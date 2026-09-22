@@ -22,6 +22,15 @@ function err(m, s = 400) { return json({ error: m }, s) }
 function strip(obj) { if (!obj) return obj; const { _id, passwordHash, ...rest } = obj; return rest }
 function cleanArr(arr) { return (arr || []).map(strip) }
 
+async function createNotification(db, { workspaceId, userId, type, title, body, link }) {
+  if (!userId) return
+  await db.collection('notifications').insertOne({
+    id: uuidv4(), workspaceId, userId, type,
+    title: title || '', body: body || '',
+    link: link || null, read: false, createdAt: new Date(),
+  })
+}
+
 async function handleRoute(request, { params }) {
   const { path = [] } = await params
   const route = '/' + path.join('/')
@@ -342,6 +351,17 @@ async function handleRoute(request, { params }) {
         createdAt: new Date(), updatedAt: new Date(),
       }
       await db.collection('tasks').insertOne(task)
+      // notify assignees
+      for (const uid of task.assignees) {
+        if (uid !== user.id) {
+          await createNotification(db, {
+            workspaceId: workspace.id, userId: uid, type: 'task_assigned',
+            title: `Nouvelle tâche · ${task.title}`,
+            body: `${user.firstName} vous a assigné une tâche`,
+            link: { view: 'tasks', taskId: task.id },
+          })
+        }
+      }
       return json(strip(task))
     }
 
@@ -380,6 +400,29 @@ async function handleRoute(request, { params }) {
         allowed.updatedAt = new Date()
         await db.collection('tasks').updateOne({ id: taskId }, { $set: allowed })
         const updated = await db.collection('tasks').findOne({ id: taskId })
+        // Notifications on relevant changes
+        if (allowed.status === 'review') {
+          // notify leader / manager
+          if (group?.leaderId && group.leaderId !== user.id) {
+            await createNotification(db, {
+              workspaceId: workspace.id, userId: group.leaderId, type: 'validation_requested',
+              title: `Validation demandée · ${task.title}`,
+              body: `${user.firstName} a demandé la validation`,
+              link: { view: 'validation', taskId: task.id },
+            })
+          }
+        }
+        if (allowed.assignees) {
+          const added = allowed.assignees.filter(uid => !(task.assignees || []).includes(uid) && uid !== user.id)
+          for (const uid of added) {
+            await createNotification(db, {
+              workspaceId: workspace.id, userId: uid, type: 'task_assigned',
+              title: `Vous avez été assigné · ${task.title}`,
+              body: `Par ${user.firstName}`,
+              link: { view: 'tasks', taskId: task.id },
+            })
+          }
+        }
         return json(strip(updated))
       }
       if (!sub && method === 'DELETE') {
@@ -412,6 +455,16 @@ async function handleRoute(request, { params }) {
         const body = await request.json()
         const c = { id: uuidv4(), userId: user.id, userName: user.firstName, content: body.content || '', createdAt: new Date() }
         await db.collection('tasks').updateOne({ id: taskId }, { $push: { comments: c }, $set: { updatedAt: new Date() } })
+        // notify assignees + creator (except self)
+        const notifTargets = new Set([...(task.assignees || []), task.createdBy].filter(uid => uid && uid !== user.id))
+        for (const uid of notifTargets) {
+          await createNotification(db, {
+            workspaceId: workspace.id, userId: uid, type: 'comment',
+            title: `Nouveau commentaire · ${task.title}`,
+            body: `${user.firstName}: ${c.content.slice(0, 100)}`,
+            link: { view: 'tasks', taskId: task.id },
+          })
+        }
         return json(c)
       }
       if (sub === 'proofs' && method === 'POST') {
@@ -445,6 +498,18 @@ async function handleRoute(request, { params }) {
         }
         await db.collection('tasks').updateOne({ id: taskId }, { $set: update })
         const updated = await db.collection('tasks').findOne({ id: taskId })
+        // notify assignees
+        for (const uid of (task.assignees || [])) {
+          if (uid !== user.id) {
+            await createNotification(db, {
+              workspaceId: workspace.id, userId: uid,
+              type: approved ? 'task_validated' : 'task_rejected',
+              title: approved ? `Tâche validée · ${task.title}` : `Correction demandée · ${task.title}`,
+              body: body.comment || '',
+              link: { view: 'tasks', taskId: task.id },
+            })
+          }
+        }
         return json(strip(updated))
       }
     }
@@ -498,9 +563,164 @@ async function handleRoute(request, { params }) {
       if (scope === 'mine') query.assignees = user.id
       else if (scope === 'group' && member.groupId && !priv) query.groupId = member.groupId
       else if (!priv && scope !== 'mine') query.$or = [{ groupId: member.groupId }, { assignees: user.id }]
-      // 'all' left as-is for privileged
       const tasks = await db.collection('tasks').find(query).toArray()
       return json(cleanArr(tasks))
+    }
+
+    // ============ CHANNELS & CHAT ============
+    if (route === '/channels' && method === 'GET') {
+      const chs = await db.collection('channels').find({ workspaceId: workspace.id }).toArray()
+      const priv = ['owner','admin'].includes(member.role)
+      const visible = chs.filter(c => {
+        if (priv) return true
+        if (c.type === 'workspace') return true
+        if (c.type === 'leaders') return member.role === 'leader'
+        if (c.type === 'group') return c.groupId === member.groupId
+        return false
+      })
+      // enrich with unread count
+      const enriched = await Promise.all(visible.map(async c => {
+        const { _id, ...rest } = c
+        const lastReadDoc = await db.collection('channel_reads').findOne({ channelId: c.id, userId: user.id })
+        const lastReadAt = lastReadDoc?.lastReadAt || new Date(0)
+        const unread = await db.collection('messages').countDocuments({ channelId: c.id, createdAt: { $gt: lastReadAt }, userId: { $ne: user.id } })
+        return { ...rest, unread }
+      }))
+      return json(enriched)
+    }
+
+    const chMatch = route.match(/^\/channels\/([^/]+)\/messages$/)
+    if (chMatch && method === 'GET') {
+      const channelId = chMatch[1]
+      const ch = await db.collection('channels').findOne({ id: channelId, workspaceId: workspace.id })
+      if (!ch) return err('Channel introuvable', 404)
+      const priv = ['owner','admin'].includes(member.role)
+      const canRead = priv || ch.type === 'workspace' || (ch.type === 'leaders' && member.role === 'leader') || (ch.type === 'group' && ch.groupId === member.groupId)
+      if (!canRead) return err('Non autorisé', 403)
+      const url = new URL(request.url)
+      const since = url.searchParams.get('since')
+      const q = { channelId, workspaceId: workspace.id }
+      if (since) q.createdAt = { $gt: new Date(since) }
+      const messages = await db.collection('messages').find(q).sort({ createdAt: 1 }).limit(200).toArray()
+      // mark as read
+      await db.collection('channel_reads').updateOne(
+        { channelId, userId: user.id },
+        { $set: { channelId, userId: user.id, lastReadAt: new Date() } },
+        { upsert: true }
+      )
+      return json(cleanArr(messages))
+    }
+    if (chMatch && method === 'POST') {
+      const channelId = chMatch[1]
+      const ch = await db.collection('channels').findOne({ id: channelId, workspaceId: workspace.id })
+      if (!ch) return err('Channel introuvable', 404)
+      const priv = ['owner','admin'].includes(member.role)
+      const canWrite = priv || ch.type === 'workspace' || (ch.type === 'leaders' && member.role === 'leader') || (ch.type === 'group' && ch.groupId === member.groupId)
+      if (!canWrite) return err('Non autorisé', 403)
+      const body = await request.json()
+      const msg = {
+        id: uuidv4(), workspaceId: workspace.id, channelId,
+        userId: user.id, userName: user.firstName,
+        avatarColor: user.avatarColor,
+        content: (body.content || '').slice(0, 4000),
+        replyToId: body.replyToId || null,
+        createdAt: new Date(),
+      }
+      await db.collection('messages').insertOne(msg)
+      // extract @mentions and create notifications
+      const mentions = (msg.content.match(/@\w+/g) || []).map(m => m.slice(1).toLowerCase())
+      if (mentions.length) {
+        const wsMembers = await db.collection('workspace_members').find({ workspaceId: workspace.id, status: 'active' }).toArray()
+        const usersInWs = await db.collection('users').find({ id: { $in: wsMembers.map(m => m.userId) } }).toArray()
+        for (const u of usersInWs) {
+          if (mentions.includes(u.firstName.toLowerCase()) && u.id !== user.id) {
+            await createNotification(db, {
+              workspaceId: workspace.id, userId: u.id, type: 'mention',
+              title: `${user.firstName} vous a mentionné`,
+              body: msg.content.slice(0, 100),
+              link: { view: 'chat', channelId },
+            })
+          }
+        }
+      }
+      return json({ ...msg, _id: undefined })
+    }
+
+    // ============ NOTIFICATIONS ============
+    if (route === '/notifications' && method === 'GET') {
+      const notifs = await db.collection('notifications')
+        .find({ userId: user.id, workspaceId: workspace.id })
+        .sort({ createdAt: -1 }).limit(50).toArray()
+      return json(cleanArr(notifs))
+    }
+    if (route === '/notifications/mark-read' && method === 'POST') {
+      const body = await request.json().catch(() => ({}))
+      const q = { userId: user.id, workspaceId: workspace.id }
+      if (body.id) q.id = body.id
+      await db.collection('notifications').updateMany(q, { $set: { read: true, readAt: new Date() } })
+      return json({ ok: true })
+    }
+
+    // ============ PILOTAGE (admin dashboard) ============
+    if (route === '/pilot' && method === 'GET') {
+      if (!['owner','admin','teacher'].includes(member.role)) return err('Non autorisé', 403)
+      const now = new Date()
+      const allTasks = await db.collection('tasks').find({ workspaceId: workspace.id, deletedAt: { $exists: false } }).toArray()
+      const groups = await db.collection('groups').find({ workspaceId: workspace.id }).toArray()
+      const wsMembers = await db.collection('workspace_members').find({ workspaceId: workspace.id, status: 'active' }).toArray()
+      const users = await db.collection('users').find({ id: { $in: wsMembers.map(m => m.userId) } }).toArray()
+      const usersById = Object.fromEntries(users.map(u => [u.id, strip(u)]))
+
+      const countBy = (arr, s) => arr.filter(t => t.status === s).length
+      const overdue = allTasks.filter(t => t.status !== 'done' && new Date(t.dueDate) < now).length
+
+      const byGroup = groups.map(g => {
+        const gt = allTasks.filter(t => t.groupId === g.id)
+        const done = gt.filter(t => t.status === 'done').length
+        return {
+          groupId: g.id, name: g.name,
+          total: gt.length, done, progress: gt.length ? Math.round((done / gt.length) * 100) : 0,
+          overdue: gt.filter(t => t.status !== 'done' && new Date(t.dueDate) < now).length,
+        }
+      })
+
+      const byMember = wsMembers.map(m => {
+        const mt = allTasks.filter(t => (t.assignees || []).includes(m.userId))
+        return {
+          userId: m.userId, user: usersById[m.userId],
+          total: mt.length, open: mt.filter(t => t.status !== 'done').length,
+          overdue: mt.filter(t => t.status !== 'done' && new Date(t.dueDate) < now).length,
+        }
+      }).sort((a, b) => b.open - a.open).slice(0, 10)
+
+      const critical = allTasks
+        .filter(t => t.status !== 'done')
+        .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))
+        .slice(0, 8)
+
+      // Trend over past 30 days (based on updatedAt and status)
+      const trend = []
+      for (let i = 29; i >= 0; i--) {
+        const d = new Date(now); d.setDate(d.getDate() - i); d.setHours(23, 59, 59, 999)
+        const doneByThen = allTasks.filter(t => t.status === 'done' && t.updatedAt && new Date(t.updatedAt) <= d).length
+        trend.push({ date: d.toISOString().slice(0, 10), done: doneByThen })
+      }
+
+      return json({
+        kpis: {
+          total: allTasks.length,
+          todo: countBy(allTasks, 'todo'),
+          in_progress: countBy(allTasks, 'in_progress'),
+          review: countBy(allTasks, 'review'),
+          blocked: countBy(allTasks, 'blocked'),
+          done: countBy(allTasks, 'done'),
+          overdue,
+        },
+        byGroup,
+        byMember,
+        critical: cleanArr(critical),
+        trend,
+      })
     }
 
     // ============ VALIDATION QUEUE ============

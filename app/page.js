@@ -1328,8 +1328,462 @@ function CreateTaskDialog({ open, onClose, me, groups, onCreated }) {
 }
 
 // ================================================================
-// CALENDAR VIEW (full page)
+// GANTT VIEW
 // ================================================================
+function GanttView({ me, users, groups, onOpenTask, refreshKey }) {
+  const [tasks, setTasks] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [zoom, setZoom] = useState('week') // day | week | month
+
+  async function load() {
+    setLoading(true)
+    try {
+      const t = await apiFetch('/tasks?scope=' + (['owner','admin','teacher'].includes(me.role) ? 'visible' : 'group'))
+      setTasks(t.filter(x => x.startDate && x.dueDate))
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+  }
+  useEffect(() => { load() }, [refreshKey])
+
+  const { minD, maxD, dayWidth, totalDays } = useMemo(() => {
+    if (tasks.length === 0) {
+      const now = new Date(); const later = new Date(now); later.setMonth(later.getMonth() + 2)
+      return { minD: now, maxD: later, dayWidth: zoom === 'day' ? 40 : zoom === 'week' ? 20 : 8, totalDays: 60 }
+    }
+    let min = new Date(Math.min(...tasks.map(t => new Date(t.startDate).getTime())))
+    let max = new Date(Math.max(...tasks.map(t => new Date(t.dueDate).getTime())))
+    min.setDate(min.getDate() - 2); max.setDate(max.getDate() + 4)
+    min.setHours(0,0,0,0); max.setHours(23,59,59,999)
+    const days = Math.ceil((max - min) / 86400000)
+    return { minD: min, maxD: max, dayWidth: zoom === 'day' ? 50 : zoom === 'week' ? 20 : 8, totalDays: days }
+  }, [tasks, zoom])
+
+  const rowHeight = 44
+  const totalWidth = totalDays * dayWidth
+  const today = new Date(); today.setHours(0,0,0,0)
+  const todayOffset = ((today - minD) / 86400000) * dayWidth
+
+  function daysToX(date) { return ((new Date(date) - minD) / 86400000) * dayWidth }
+  function daysToWidth(start, end) { return Math.max(dayWidth, ((new Date(end) - new Date(start)) / 86400000) * dayWidth) }
+
+  // Header ticks
+  const ticks = []
+  const cur = new Date(minD)
+  while (cur <= maxD) {
+    ticks.push(new Date(cur))
+    if (zoom === 'day') cur.setDate(cur.getDate() + 1)
+    else if (zoom === 'week') cur.setDate(cur.getDate() + 7)
+    else { cur.setMonth(cur.getMonth() + 1); cur.setDate(1) }
+  }
+
+  return (
+    <div className="space-y-5 anim-fade-up">
+      <div className="flex items-end justify-between flex-wrap gap-3">
+        <div>
+          <p className="text-sm text-2 mb-1">Chronologie</p>
+          <h1 className="t-h1">Gantt</h1>
+          <p className="text-sm text-2 mt-2">{tasks.length} tâche(s) affichée(s)</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="pill-group">
+            <button className={`pill ${zoom === 'day' ? 'pill-active' : ''}`} onClick={() => setZoom('day')}>Jour</button>
+            <button className={`pill ${zoom === 'week' ? 'pill-active' : ''}`} onClick={() => setZoom('week')}>Semaine</button>
+            <button className={`pill ${zoom === 'month' ? 'pill-active' : ''}`} onClick={() => setZoom('month')}>Mois</button>
+          </div>
+          <button onClick={() => { const el = document.getElementById('gantt-scroll'); if (el) el.scrollLeft = Math.max(0, todayOffset - 200) }}
+            className="h-9 px-3 rounded-full btn-ghost text-[12.5px]">Aujourd'hui</button>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="p-12 flex justify-center"><Loader2 className="animate-spin text-white/30" /></div>
+      ) : tasks.length === 0 ? (
+        <div className="surface p-12 text-center">
+          <GanttChart className="w-8 h-8 mx-auto text-white/25 mb-2" />
+          <p className="text-sm text-2">Aucune tâche avec dates. Ajoute des dates pour voir la chronologie.</p>
+        </div>
+      ) : (
+        <div className="surface p-0 overflow-hidden">
+          <div id="gantt-scroll" className="overflow-x-auto">
+            <div style={{ width: Math.max(800, totalWidth + 240) }}>
+              {/* Header */}
+              <div className="flex border-b border-[color:var(--w-border)]">
+                <div className="w-[240px] shrink-0 px-4 py-2 text-[11px] uppercase text-3 font-medium border-r border-[color:var(--w-border)]">Tâche</div>
+                <div className="relative flex-1" style={{ height: 32 }}>
+                  {ticks.map((t, i) => (
+                    <div key={i} style={{ left: daysToX(t), position: 'absolute', top: 0, height: '100%' }}
+                      className="border-l border-[color:var(--w-border)] pl-1.5 pt-1.5 text-[10px] text-3">
+                      {zoom === 'day' ? t.toLocaleDateString('fr-CH', { day: '2-digit', month: 'short' })
+                        : zoom === 'week' ? `S${Math.ceil(t.getDate() / 7)} ${t.toLocaleDateString('fr-CH', { month: 'short' })}`
+                        : t.toLocaleDateString('fr-CH', { month: 'long', year: '2-digit' })}
+                    </div>
+                  ))}
+                  {/* today line */}
+                  <div style={{ left: todayOffset, position: 'absolute', top: 0, height: '100%' }}
+                    className="w-px bg-white/30" />
+                </div>
+              </div>
+              {/* Rows */}
+              <div className="relative">
+                {tasks.map((t, idx) => {
+                  const x = daysToX(t.startDate)
+                  const w = daysToWidth(t.startDate, t.dueDate)
+                  const g = groups.find(gr => gr.id === t.groupId)
+                  const done = t.status === 'done'
+                  return (
+                    <div key={t.id} className="flex border-b border-[color:var(--w-border)]/50 hover:bg-white/[0.02] transition"
+                      style={{ height: rowHeight }}>
+                      <div className="w-[240px] shrink-0 px-4 flex flex-col justify-center border-r border-[color:var(--w-border)]">
+                        <p className="text-[12.5px] font-medium truncate">{t.title}</p>
+                        <p className="text-[10px] text-3 truncate">{g?.name}</p>
+                      </div>
+                      <div className="relative flex-1" style={{ height: rowHeight }}>
+                        <button onClick={() => onOpenTask(t)}
+                          className="absolute top-2 rounded-md border transition-all hover:scale-y-110 origin-left cursor-pointer overflow-hidden group"
+                          style={{
+                            left: x, width: w, height: rowHeight - 16,
+                            background: done ? 'rgba(52,211,153,0.18)' : 'rgba(96,165,250,0.16)',
+                            borderColor: done ? 'rgba(52,211,153,0.4)' : 'rgba(96,165,250,0.35)',
+                          }}
+                          title={t.title}>
+                          <div className="h-full flex items-center px-2 gap-1.5 text-[11px] text-white/95 whitespace-nowrap">
+                            <span className={`dot ${STATUS[t.status].dot} shrink-0`} />
+                            <span className="truncate font-medium">{t.title}</span>
+                          </div>
+                        </button>
+                        <div style={{ left: todayOffset, position: 'absolute', top: 0, height: '100%' }}
+                          className="w-px bg-white/25 pointer-events-none" />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ================================================================
+// CHAT VIEW
+// ================================================================
+function ChatView({ me, users, refreshKey }) {
+  const [channels, setChannels] = useState([])
+  const [active, setActive] = useState(null)
+  const [messages, setMessages] = useState([])
+  const [input, setInput] = useState('')
+  const [loading, setLoading] = useState(true)
+
+  async function loadChannels() {
+    try {
+      const chs = await apiFetch('/channels')
+      setChannels(chs)
+      if (!active && chs.length) setActive(chs[0])
+    } catch (e) { toast.error(e.message) }
+  }
+  useEffect(() => { loadChannels(); const int = setInterval(loadChannels, 10000); return () => clearInterval(int) }, [refreshKey])
+
+  async function loadMessages() {
+    if (!active) return
+    try {
+      const ms = await apiFetch(`/channels/${active.id}/messages`)
+      setMessages(ms)
+    } catch (e) {} finally { setLoading(false) }
+  }
+  useEffect(() => {
+    if (!active) return
+    setLoading(true); loadMessages()
+    const int = setInterval(loadMessages, 3500)
+    return () => clearInterval(int)
+  }, [active])
+
+  useEffect(() => {
+    const el = document.getElementById('chat-scroll')
+    if (el) el.scrollTop = el.scrollHeight
+  }, [messages.length])
+
+  async function send() {
+    if (!input.trim() || !active) return
+    const content = input; setInput('')
+    try {
+      const msg = await apiFetch(`/channels/${active.id}/messages`, { method: 'POST', body: JSON.stringify({ content }) })
+      setMessages(prev => [...prev, msg])
+    } catch (e) { toast.error(e.message); setInput(content) }
+  }
+
+  return (
+    <div className="anim-fade-up h-[calc(100vh-140px)] md:h-[calc(100vh-200px)] flex flex-col md:flex-row gap-4">
+      {/* Channels */}
+      <aside className="surface p-3 md:w-64 md:shrink-0 overflow-y-auto max-h-[180px] md:max-h-none">
+        <p className="text-[11px] uppercase text-3 px-2 mb-2 font-medium">Channels</p>
+        <div className="space-y-0.5">
+          {channels.map(c => (
+            <button key={c.id} onClick={() => setActive(c)}
+              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-[13px] transition ${
+                active?.id === c.id ? 'bg-white/[0.06] text-white' : 'text-2 hover:bg-white/[0.03] hover:text-white'
+              }`}>
+              <span className="text-3">#</span>
+              <span className="flex-1 truncate">{c.name}</span>
+              {c.unread > 0 && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-white text-[#0a1428] font-semibold tabular-nums">{c.unread}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      </aside>
+
+      {/* Messages */}
+      <section className="surface flex-1 flex flex-col overflow-hidden">
+        {!active ? (
+          <div className="flex-1 flex items-center justify-center text-2">Sélectionne un channel</div>
+        ) : (
+          <>
+            <div className="px-5 py-3 border-b border-[color:var(--w-border)] flex items-center gap-2">
+              <span className="text-3">#</span>
+              <h2 className="font-semibold">{active.name}</h2>
+              <span className="text-[11px] text-3 ml-2">{active.description}</span>
+            </div>
+            <div id="chat-scroll" className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
+              {loading && messages.length === 0 && <p className="text-center text-sm text-3">Chargement…</p>}
+              {!loading && messages.length === 0 && <p className="text-center text-sm text-3">Aucun message. Sois le premier à écrire.</p>}
+              {messages.map((m, i) => {
+                const prev = messages[i - 1]
+                const grouped = prev && prev.userId === m.userId && (new Date(m.createdAt) - new Date(prev.createdAt) < 5 * 60 * 1000)
+                return (
+                  <div key={m.id} className="flex gap-3">
+                    <div className="w-8 shrink-0">
+                      {!grouped && (
+                        <div className="w-8 h-8 rounded-full flex items-center justify-center text-white font-semibold text-xs"
+                          style={{ background: m.avatarColor || '#3a5375' }}>
+                          {initials(m.userName)}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      {!grouped && (
+                        <div className="flex items-baseline gap-2">
+                          <span className="font-semibold text-[13px]">{m.userName}</span>
+                          <span className="text-[10px] text-3">{new Date(m.createdAt).toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' })}</span>
+                        </div>
+                      )}
+                      <p className="text-[13.5px] leading-snug whitespace-pre-wrap break-words">{m.content}</p>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+            <div className="px-4 py-3 border-t border-[color:var(--w-border)] flex gap-2">
+              <input value={input} onChange={e => setInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), send())}
+                placeholder={`Écrire dans #${active.name}…`}
+                className="flex-1 h-10 px-3 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)] text-white text-sm focus:outline-none focus:border-white/25" />
+              <button onClick={send} className="w-10 h-10 rounded-xl btn-primary flex items-center justify-center">
+                <Send className="w-4 h-4" />
+              </button>
+            </div>
+          </>
+        )}
+      </section>
+    </div>
+  )
+}
+
+// ================================================================
+// NOTIFICATIONS
+// ================================================================
+function useNotifications(refreshKey) {
+  const [notifications, setNotifications] = useState([])
+  const [unread, setUnread] = useState(0)
+  async function load() {
+    try {
+      const n = await apiFetch('/notifications')
+      setNotifications(n)
+      setUnread(n.filter(x => !x.read).length)
+    } catch {}
+  }
+  useEffect(() => { load(); const int = setInterval(load, 15000); return () => clearInterval(int) }, [refreshKey])
+  return { notifications, unread, reload: load }
+}
+
+function NotificationsView({ notifications, onGoto, onMarkRead, onMarkAllRead }) {
+  return (
+    <div className="space-y-5 anim-fade-up">
+      <div className="flex items-end justify-between flex-wrap gap-3">
+        <div>
+          <p className="text-sm text-2 mb-1">Alertes & activité</p>
+          <h1 className="t-h1">Notifications</h1>
+        </div>
+        <button onClick={onMarkAllRead} className="h-9 px-4 rounded-full btn-ghost text-[12.5px]">Tout marquer comme lu</button>
+      </div>
+      <div className="surface divide-y divide-[color:var(--w-border)] overflow-hidden">
+        {notifications.length === 0 && <div className="p-10 text-center text-sm text-2">Aucune notification.</div>}
+        {notifications.map(n => (
+          <button key={n.id} onClick={() => { onMarkRead(n.id); onGoto(n.link) }}
+            className={`w-full flex items-start gap-3 px-4 py-3 text-left hover:bg-white/[0.02] transition ${n.read ? '' : 'bg-white/[0.02]'}`}>
+            <span className={`w-2 h-2 rounded-full mt-2 shrink-0 ${n.read ? 'bg-white/15' : 'bg-blue-400'}`} />
+            <div className="flex-1 min-w-0">
+              <p className="font-medium text-[13.5px] truncate">{n.title}</p>
+              {n.body && <p className="text-[12px] text-2 truncate mt-0.5">{n.body}</p>}
+              <p className="text-[10.5px] text-3 mt-1">{new Date(n.createdAt).toLocaleString('fr-CH')}</p>
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ================================================================
+// PILOT VIEW (admin)
+// ================================================================
+function PilotView({ users, groups, refreshKey, onOpenTask, onNavigate }) {
+  const [data, setData] = useState(null)
+  useEffect(() => { apiFetch('/pilot').then(setData).catch(e => toast.error(e.message)) }, [refreshKey])
+  if (!data) return <div className="p-12 flex justify-center"><Loader2 className="animate-spin text-white/30" /></div>
+
+  const { kpis, byGroup, byMember, critical, trend } = data
+  const donutData = [
+    { label: 'Terminé', value: kpis.done, color: '#34d399' },
+    { label: 'En cours', value: kpis.in_progress, color: '#60a5fa' },
+    { label: 'À valider', value: kpis.review, color: '#f59e0b' },
+    { label: 'À faire', value: kpis.todo, color: '#475569' },
+    { label: 'Bloqué', value: kpis.blocked, color: '#ef4444' },
+  ]
+
+  // Simple sparkline for trend
+  const maxTrend = Math.max(...trend.map(t => t.done), 1)
+  const trendW = 240, trendH = 60
+  const pts = trend.map((t, i) => {
+    const x = (i / (trend.length - 1)) * trendW
+    const y = trendH - (t.done / maxTrend) * trendH
+    return `${x},${y}`
+  }).join(' ')
+
+  return (
+    <div className="space-y-6 anim-fade-up">
+      <div>
+        <p className="text-sm text-2 mb-1">Vue d'ensemble · admin</p>
+        <h1 className="t-h1">Pilotage</h1>
+      </div>
+
+      {/* KPIs row */}
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+        {[
+          { l: 'Total',      v: kpis.total,       dot: 'bg-white/50' },
+          { l: 'À faire',    v: kpis.todo,        dot: 'bg-slate-400' },
+          { l: 'En cours',   v: kpis.in_progress, dot: 'bg-blue-400' },
+          { l: 'À valider',  v: kpis.review,      dot: 'bg-amber-400' },
+          { l: 'Bloqué',     v: kpis.blocked,     dot: 'bg-red-400' },
+          { l: 'Terminé',    v: kpis.done,        dot: 'bg-emerald-400' },
+          { l: 'En retard',  v: kpis.overdue,     dot: 'bg-red-500', danger: true },
+        ].map(k => (
+          <div key={k.l} className="surface p-4">
+            <div className="flex items-center gap-2 mb-1.5">
+              <span className={`w-1.5 h-1.5 rounded-full ${k.dot}`} />
+              <span className="text-[10.5px] text-3 font-medium">{k.l}</span>
+            </div>
+            <p className={`text-2xl font-bold tabular-nums ${k.danger && k.v > 0 ? 'text-red-300' : ''}`}>{k.v}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* By group */}
+        <div className="surface p-5 lg:col-span-2">
+          <h2 className="t-h2 mb-4">Progression par groupe</h2>
+          <div className="space-y-3">
+            {byGroup.map(g => (
+              <div key={g.groupId}>
+                <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-[13.5px]">{g.name}</span>
+                    <span className="text-[10.5px] text-3">{g.done}/{g.total}</span>
+                    {g.overdue > 0 && <span className="text-[10.5px] text-red-300">· {g.overdue} en retard</span>}
+                  </div>
+                  <span className="text-[12.5px] font-semibold tabular-nums">{g.progress}%</span>
+                </div>
+                <div className="h-1.5 bg-white/[0.05] rounded-full overflow-hidden">
+                  <div className="h-full bg-gradient-to-r from-emerald-400 to-blue-400 rounded-full transition-all duration-700" style={{ width: `${g.progress}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Donut */}
+        <div className="surface p-5">
+          <h2 className="t-h2 mb-4">Répartition</h2>
+          <div className="flex items-center gap-4">
+            <Donut data={donutData} size={140} />
+            <div className="space-y-1.5 flex-1 text-[12px]">
+              {donutData.map(d => (
+                <div key={d.label} className="flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full" style={{ background: d.color }} />
+                  <span className="flex-1 text-2">{d.label}</span>
+                  <span className="tabular-nums font-medium">{d.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Trend */}
+        <div className="surface p-5">
+          <h2 className="t-h2 mb-3">Tâches terminées (30j)</h2>
+          <svg width="100%" height={trendH + 20} viewBox={`0 0 ${trendW} ${trendH + 20}`} className="mt-2">
+            <polyline fill="none" stroke="#60a5fa" strokeWidth="2" points={pts} />
+          </svg>
+          <p className="text-[11px] text-3">{trend[trend.length - 1]?.done || 0} tâches terminées aujourd'hui</p>
+        </div>
+
+        {/* By member */}
+        <div className="surface p-5 lg:col-span-2">
+          <h2 className="t-h2 mb-3">Charge par personne</h2>
+          <div className="space-y-1.5">
+            {byMember.map(m => (
+              <div key={m.userId} className="flex items-center gap-3 py-1.5">
+                <UserAvatar user={m.user} size={26} />
+                <span className="text-[13px] font-medium flex-1 truncate">{m.user?.firstName}</span>
+                <span className="text-[11px] text-3 w-16 text-right">{m.total} tâches</span>
+                <span className="text-[11px] text-2 w-16 text-right">{m.open} ouv.</span>
+                <span className={`text-[11px] w-16 text-right ${m.overdue > 0 ? 'text-red-300 font-medium' : 'text-3'}`}>{m.overdue} retard</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Critical */}
+        <div className="surface p-5 lg:col-span-3">
+          <h2 className="t-h2 mb-3">Échéances critiques</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {critical.map(t => (
+              <button key={t.id} onClick={() => onOpenTask(t)}
+                className="surface-flat p-3 hover:border-white/15 text-left transition flex items-center gap-3">
+                <span className={`dot ${STATUS[t.status].dot}`} />
+                <div className="flex-1 min-w-0">
+                  <p className="text-[13px] font-medium truncate">{t.title}</p>
+                  <p className="text-[10.5px] text-3">Échéance {fmtDate(t.dueDate)}</p>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="lg:col-span-3 flex flex-wrap gap-2">
+          <button onClick={() => onNavigate('gantt')} className="h-9 px-4 rounded-full btn-ghost text-[12.5px] inline-flex items-center gap-1">
+            <GanttChart className="w-3.5 h-3.5" /> Ouvrir Gantt
+          </button>
+          <button onClick={() => onNavigate('calendar')} className="h-9 px-4 rounded-full btn-ghost text-[12.5px] inline-flex items-center gap-1">
+            <CalIcon className="w-3.5 h-3.5" /> Ouvrir Calendrier
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
 function CalendarView({ me, users, onOpenTask, onCreate, refreshKey }) {
   const [view, setView] = useState('month') // month | week | day
   const [ref, setRef] = useState(new Date())
@@ -2067,6 +2521,7 @@ export default function App() {
   const [showWelcome, setShowWelcome] = useState(false)
   const [onboardingMode, setOnboardingMode] = useState(null) // 'create' | 'join' | null (opened from switcher)
   const [invitePanelOpen, setInvitePanelOpen] = useState(false)
+  const notifs = useNotifications(refreshKey)
 
   async function loadWorkspaceData() {
     try {
@@ -2180,12 +2635,13 @@ export default function App() {
     { key: 'tasks', label: 'Mes tâches', icon: ListChecks },
     { key: 'group', label: 'Mon groupe', icon: Users, hidden: !myGroupId },
     ...(canValidate ? [{ key: 'validation', label: 'Validation', icon: CheckCheck }] : []),
+    { key: 'calendar', label: 'Calendrier', icon: CalIcon },
+    { key: 'gantt', label: 'Gantt', icon: GanttChart },
+    { key: 'chat', label: 'Chat', icon: MessageSquare },
+    { key: 'notifs', label: 'Notifications', icon: Bell },
+    ...(isAdmin ? [{ key: 'pilot', label: 'Pilotage', icon: BarChart3 }] : []),
     ...(isAdmin ? [{ key: 'admin_groups', label: 'Tous groupes', icon: Shield }] : []),
     { key: 'members', label: 'Membres', icon: UserIcon },
-    { key: 'calendar', label: 'Calendrier', icon: CalIcon },
-    { key: 'gantt', label: 'Gantt', icon: GanttChart, soon: true },
-    { key: 'chat', label: 'Chat', icon: MessageSquare, soon: true },
-    { key: 'notifs', label: 'Notifications', icon: Bell, soon: true },
   ].filter(n => !n.hidden)
 
   const Sidebar = (
@@ -2210,6 +2666,9 @@ export default function App() {
             className={`nav-item w-full ${view === n.key ? 'nav-item-active' : ''} ${n.soon ? 'opacity-40 cursor-not-allowed hover:bg-transparent' : ''}`}>
             <n.icon className="w-4 h-4 shrink-0" />
             <span className="flex-1 text-left">{n.label}</span>
+            {n.key === 'notifs' && notifs.unread > 0 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500 text-white font-semibold tabular-nums">{notifs.unread}</span>
+            )}
             {n.soon && <span className="text-[9px] uppercase tracking-widest text-3">soon</span>}
           </button>
         ))}
@@ -2245,6 +2704,13 @@ export default function App() {
       case 'admin_groups': return <AllGroupsView groups={groups} onOpenGroup={gid => { setViewGroupId(gid); setView('group') }} />
       case 'members': return <MembersView workspace={workspace} canManage={isAdmin} refreshKey={refreshKey} onRefresh={() => { loadWorkspaceData(); refresh() }} />
       case 'calendar': return <CalendarView me={meCtx} users={users} onOpenTask={openTask} onCreate={() => setCreateOpen(true)} refreshKey={refreshKey} />
+      case 'gantt': return <GanttView me={meCtx} users={users} groups={groups} onOpenTask={openTask} refreshKey={refreshKey} />
+      case 'chat': return <ChatView me={meCtx} users={users} refreshKey={refreshKey} />
+      case 'notifs': return <NotificationsView notifications={notifs.notifications}
+        onGoto={(link) => { if (link?.view) goto(link.view) }}
+        onMarkRead={(id) => apiFetch('/notifications/mark-read', { method: 'POST', body: JSON.stringify({ id }) }).then(() => notifs.reload())}
+        onMarkAllRead={() => apiFetch('/notifications/mark-read', { method: 'POST', body: '{}' }).then(() => notifs.reload())} />
+      case 'pilot': return <PilotView users={users} groups={groups} refreshKey={refreshKey} onOpenTask={openTask} onNavigate={goto} />
       default: return (
         <div className="anim-fade-up surface p-16 text-center">
           <p className="text-sm text-2">Cette section arrive bientôt.</p>
