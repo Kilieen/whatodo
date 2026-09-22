@@ -48,3 +48,9 @@ node_modules/@next/swc-linux-arm64-musl/next-swc.linux-arm64-musl.node
 
 # emergent internals
 .emergent/
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials

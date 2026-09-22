@@ -3,20 +3,33 @@ import { v4 as uuidv4 } from 'uuid'
 import { getDb } from '@/lib/mongo'
 import { signToken, comparePassword, hashPassword,
   requireUser, requireWorkspace,
-  canManageWorkspace, canManageGroupTasks, canViewTask
+  canManageWorkspace, canManageGroupTasks, canViewTask,
+  rateLimit, getClientIp, validateDataUrl, UPLOAD_LIMITS
 } from '@/lib/authz'
 import { makeInviteCode, ensureDefaultChannels, audit } from '@/lib/seed'
 
-function cors(res) {
-  res.headers.set('Access-Control-Allow-Origin', '*')
+// CORS: scope to known origins in production, permissive in dev/preview.
+// Preserves compatibility with Emergent preview subdomains + local dev.
+function corsOriginFor(request) {
+  const origin = request.headers.get('origin') || ''
+  const allowed = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
+  // If no whitelist configured, echo the request origin (dev/preview-friendly). Still safe with Bearer-token auth.
+  if (allowed.length === 0) return origin || '*'
+  if (allowed.includes('*')) return origin || '*'
+  return allowed.includes(origin) ? origin : allowed[0] || 'null'
+}
+function cors(res, request) {
+  const originVal = request ? corsOriginFor(request) : '*'
+  res.headers.set('Access-Control-Allow-Origin', originVal)
+  res.headers.set('Vary', 'Origin')
   res.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS')
   res.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Workspace-Id')
   return res
 }
-export async function OPTIONS() { return cors(new NextResponse(null, { status: 200 })) }
+export async function OPTIONS(request) { return cors(new NextResponse(null, { status: 200 }), request) }
 
-function json(data, status = 200) { return cors(NextResponse.json(data, { status })) }
-function err(m, s = 400) { return json({ error: m }, s) }
+function json(data, status = 200, request = null) { return cors(NextResponse.json(data, { status }), request) }
+function err(m, s = 400, request = null) { return json({ error: m }, s, request) }
 
 function strip(obj) { if (!obj) return obj; const { _id, passwordHash, ...rest } = obj; return rest }
 function cleanArr(arr) { return (arr || []).map(strip) }
@@ -39,26 +52,38 @@ async function handleRoute(request, { params }) {
   try {
     // ============ AUTH ============
     if (route === '/auth/login' && method === 'POST') {
+      const ip = getClientIp(request)
+      const rl = rateLimit(`login:${ip}`, { max: 10, windowMs: 60_000 })
+      if (!rl.ok) return err(`Trop de tentatives. Réessayez dans ${rl.retryAfterSec}s.`, 429, request)
       const body = await request.json()
       const user = await db.collection('users').findOne({ email: (body.email || '').toLowerCase().trim() })
-      if (!user) return err('Identifiants invalides', 401)
+      if (!user) return err('Identifiants invalides', 401, request)
       const ok = await comparePassword(body.password || '', user.passwordHash)
-      if (!ok) return err('Identifiants invalides', 401)
-      const token = signToken({ uid: user.id })
-      return json({ token, user: strip(user) })
+      if (!ok) return err('Identifiants invalides', 401, request)
+      const token = signToken({ uid: user.id, pv: user.passwordVersion || 0 })
+      return json({ token, user: strip(user) }, 200, request)
     }
 
     if (route === '/auth/register' && method === 'POST') {
+      const ip = getClientIp(request)
+      const rl = rateLimit(`register:${ip}`, { max: 5, windowMs: 60_000 })
+      if (!rl.ok) return err(`Trop de tentatives. Réessayez dans ${rl.retryAfterSec}s.`, 429, request)
       const body = await request.json()
       const email = (body.email || '').toLowerCase().trim()
-      if (!email || !body.password || !body.firstName) return err('Champs requis manquants', 400)
-      if ((body.password || '').length < 8) return err('Le mot de passe doit contenir au moins 8 caractères', 400)
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return err('Email invalide', 400)
+      if (!email || !body.password || !body.firstName) return err('Champs requis manquants', 400, request)
+      if ((body.password || '').length < 8) return err('Le mot de passe doit contenir au moins 8 caractères', 400, request)
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return err('Email invalide', 400, request)
+      // Validate optional avatar
+      if (body.avatar) {
+        const v = validateDataUrl(body.avatar, UPLOAD_LIMITS.avatar)
+        if (!v.ok) return err(v.error, 400, request)
+      }
       const exists = await db.collection('users').findOne({ email })
-      if (exists) return err('Un compte existe déjà avec cet email', 400)
+      if (exists) return err('Un compte existe déjà avec cet email', 400, request)
       const passwordHash = await hashPassword(body.password)
       const user = {
         id: uuidv4(), email, passwordHash,
+        passwordVersion: 0,
         firstName: body.firstName, lastName: body.lastName || '',
         avatarColor: body.avatarColor || '#3a5375',
         avatar: body.avatar || null,
@@ -71,8 +96,8 @@ async function handleRoute(request, { params }) {
         role: 'student', groupId: null,
       }
       await db.collection('users').insertOne(user)
-      const token = signToken({ uid: user.id })
-      return json({ token, user: strip(user) })
+      const token = signToken({ uid: user.id, pv: 0 })
+      return json({ token, user: strip(user) }, 200, request)
     }
 
     if (route === '/auth/me' && method === 'GET') {
@@ -93,58 +118,94 @@ async function handleRoute(request, { params }) {
 
     if (route === '/auth/me' && method === 'PATCH') {
       const user = await requireUser(request, db)
-      if (!user) return err('Non authentifié', 401)
+      if (!user) return err('Non authentifié', 401, request)
       const body = await request.json()
       const allowed = {}
-      const fields = ['firstName', 'lastName', 'avatar', 'avatarColor', 'timezone', 'locale', 'theme', 'notifPrefs', 'tutorialSeen', 'bio', 'displayName']
+      const fields = ['firstName', 'lastName', 'avatarColor', 'timezone', 'locale', 'theme', 'notifPrefs', 'tutorialSeen', 'bio', 'displayName']
       for (const f of fields) if (f in body) allowed[f] = body[f]
+      if ('avatar' in body) {
+        if (body.avatar === null || body.avatar === '') allowed.avatar = null
+        else {
+          const v = validateDataUrl(body.avatar, UPLOAD_LIMITS.avatar)
+          if (!v.ok) return err(v.error, 400, request)
+          allowed.avatar = body.avatar
+        }
+      }
       if ('email' in body) {
         const email = (body.email || '').toLowerCase().trim()
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return err('Email invalide', 400)
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return err('Email invalide', 400, request)
         const dup = await db.collection('users').findOne({ email, id: { $ne: user.id } })
-        if (dup) return err('Cet email est déjà utilisé', 400)
+        if (dup) return err('Cet email est déjà utilisé', 400, request)
         allowed.email = email
       }
       allowed.updatedAt = new Date()
       await db.collection('users').updateOne({ id: user.id }, { $set: allowed })
       const u = await db.collection('users').findOne({ id: user.id })
-      return json({ user: strip(u) })
+      return json({ user: strip(u) }, 200, request)
     }
 
     if (route === '/auth/change-password' && method === 'POST') {
       const user = await requireUser(request, db)
-      if (!user) return err('Non authentifié', 401)
+      if (!user) return err('Non authentifié', 401, request)
       const body = await request.json()
-      if (!body.currentPassword || !body.newPassword) return err('Champs requis', 400)
-      if (body.newPassword.length < 8) return err('Nouveau mot de passe trop court (min. 8 caractères)', 400)
+      if (!body.currentPassword || !body.newPassword) return err('Champs requis', 400, request)
+      if (body.newPassword.length < 8) return err('Nouveau mot de passe trop court (min. 8 caractères)', 400, request)
       const full = await db.collection('users').findOne({ id: user.id })
       const ok = await comparePassword(body.currentPassword, full.passwordHash)
-      if (!ok) return err('Mot de passe actuel incorrect', 401)
+      if (!ok) return err('Mot de passe actuel incorrect', 401, request)
       const passwordHash = await hashPassword(body.newPassword)
-      await db.collection('users').updateOne({ id: user.id }, { $set: { passwordHash, updatedAt: new Date() } })
-      return json({ ok: true })
+      const nextPv = (full.passwordVersion || 0) + 1
+      await db.collection('users').updateOne({ id: user.id }, { $set: { passwordHash, passwordVersion: nextPv, updatedAt: new Date() } })
+      // Return a fresh token so the caller stays logged in; older tokens now invalid.
+      const token = signToken({ uid: user.id, pv: nextPv })
+      return json({ ok: true, token }, 200, request)
     }
 
     if (route === '/auth/forgot-password' && method === 'POST') {
-      // Structural only \u2014 real email flow will be handled by Supabase Auth after migration.
-      // We store the reset token so the flow can be completed once emails are wired.
+      const ip = getClientIp(request)
+      const rl = rateLimit(`forgot:${ip}`, { max: 5, windowMs: 60_000 })
+      if (!rl.ok) return err(`Trop de tentatives. Réessayez dans ${rl.retryAfterSec}s.`, 429, request)
       const body = await request.json().catch(() => ({}))
       const email = (body.email || '').toLowerCase().trim()
-      if (!email) return err('Email requis', 400)
+      if (!email) return err('Email requis', 400, request)
       const user = await db.collection('users').findOne({ email })
       if (user) {
-        const token = uuidv4()
+        const token = uuidv4().replace(/-/g, '')
         await db.collection('password_resets').insertOne({
           id: uuidv4(), userId: user.id, token,
           expiresAt: new Date(Date.now() + 60 * 60 * 1000),
           used: false, createdAt: new Date(),
         })
+        // Email delivery is deferred to Supabase Auth (see MIGRATION.md).
+        console.log(`[password-reset] token for ${email}: ${token}`)
       }
-      // Always return success to avoid user enumeration
       return json({
         ok: true,
         message: "Si un compte existe pour cet email, un lien de r\u00e9initialisation sera envoy\u00e9 (activ\u00e9 apr\u00e8s la migration Supabase)."
-      })
+      }, 200, request)
+    }
+
+    if (route === '/auth/reset-password' && method === 'POST') {
+      const ip = getClientIp(request)
+      const rl = rateLimit(`reset:${ip}`, { max: 10, windowMs: 60_000 })
+      if (!rl.ok) return err(`Trop de tentatives. Réessayez dans ${rl.retryAfterSec}s.`, 429, request)
+      const body = await request.json().catch(() => ({}))
+      const token = (body.token || '').trim()
+      const newPassword = body.newPassword || ''
+      if (!token || !newPassword) return err('Token et mot de passe requis', 400, request)
+      if (newPassword.length < 8) return err('Mot de passe trop court (min. 8 caractères)', 400, request)
+      const rec = await db.collection('password_resets').findOne({ token })
+      // Uniform error to prevent token enumeration
+      if (!rec) return err('Token invalide ou expiré', 400, request)
+      if (rec.used) return err('Token invalide ou expiré', 400, request)
+      if (rec.expiresAt && new Date(rec.expiresAt) < new Date()) return err('Token invalide ou expiré', 400, request)
+      const passwordHash = await hashPassword(newPassword)
+      const full = await db.collection('users').findOne({ id: rec.userId })
+      if (!full) return err('Token invalide ou expiré', 400, request)
+      const nextPv = (full.passwordVersion || 0) + 1
+      await db.collection('users').updateOne({ id: rec.userId }, { $set: { passwordHash, passwordVersion: nextPv, updatedAt: new Date() } })
+      await db.collection('password_resets').updateOne({ id: rec.id }, { $set: { used: true, usedAt: new Date() } })
+      return json({ ok: true }, 200, request)
     }
 
     if (route === '/auth/delete-account' && method === 'POST') {
@@ -194,6 +255,10 @@ async function handleRoute(request, { params }) {
       if (!user) return err('Non authentifié', 401)
       const body = await request.json()
       if (!body.name) return err('Nom requis', 400)
+      if (body.logo) {
+        const v = validateDataUrl(body.logo, UPLOAD_LIMITS.workspaceLogo)
+        if (!v.ok) return err(v.error, 400)
+      }
       const wid = uuidv4()
       const workspace = {
         id: wid,
@@ -330,8 +395,18 @@ async function handleRoute(request, { params }) {
       const memberId = memMatch[1]
       const target = await db.collection('workspace_members').findOne({ id: memberId, workspaceId: workspace.id })
       if (!target) return err('Membre introuvable', 404)
-      // Cannot demote yourself if you're the only owner
       const body = await request.json()
+      // SEC-002: never allow anyone but an existing owner to grant/revoke the `owner` role,
+      // and forbid self-role modifications (an admin cannot promote themselves).
+      if ('role' in body) {
+        const wantsOwnerChange = body.role === 'owner' || target.role === 'owner'
+        if (wantsOwnerChange && member.role !== 'owner') {
+          return err('Seul le owner peut gérer le rôle owner', 403)
+        }
+        if (target.userId === user.id) {
+          return err("Impossible de modifier votre propre rôle", 403)
+        }
+      }
       const update = {}
       if ('role' in body) {
         if (['owner','admin','leader','member','teacher','viewer'].includes(body.role)) update.role = body.role
@@ -599,6 +674,10 @@ async function handleRoute(request, { params }) {
       if (sub === 'proofs' && method === 'POST') {
         if (!canViewTask({ ...member, userId: user.id }, task)) return err('Non autorisé', 403)
         const body = await request.json()
+        if (body.fileData) {
+          const v = validateDataUrl(body.fileData, UPLOAD_LIMITS.taskProof)
+          if (!v.ok) return err(v.error, 400)
+        }
         const proof = {
           id: uuidv4(), userId: user.id, userName: user.firstName,
           type: body.type || 'file', fileData: body.fileData || null, fileName: body.fileName || null,
@@ -870,6 +949,10 @@ async function handleRoute(request, { params }) {
     if (route === '/workspace' && method === 'PATCH') {
       if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
       const body = await request.json()
+      if (body.logo) {
+        const v = validateDataUrl(body.logo, UPLOAD_LIMITS.workspaceLogo)
+        if (!v.ok) return err(v.error, 400)
+      }
       const update = {}
       const fields = ['name', 'description', 'icon', 'emoji', 'logo', 'color']
       for (const f of fields) if (f in body) update[f] = body[f]
@@ -1008,10 +1091,11 @@ async function handleRoute(request, { params }) {
       return json(strip(updated))
     }
 
-    return err(`Route ${route} not found`, 404)
+    return err(`Route ${route} not found`, 404, request)
   } catch (e) {
     console.error('API error', e)
-    return err('Erreur serveur: ' + e.message, 500)
+    // Do NOT leak internal error messages to the client (SEC hardening).
+    return err('Erreur serveur', 500, request)
   }
 }
 
