@@ -45,13 +45,16 @@ function WhatodoLogo({ size = 40, className = '', stroke = 'currentColor' }) {
 // ================================================================
 const API = '/api'
 function getToken() { return typeof window !== 'undefined' ? localStorage.getItem('whatodo_token') : null }
+function getWorkspaceId() { return typeof window !== 'undefined' ? localStorage.getItem('whatodo_workspace') : null }
 async function apiFetch(path, opts = {}) {
   const token = getToken()
+  const wid = getWorkspaceId()
   const res = await fetch(API + path, {
     ...opts,
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(wid ? { 'X-Workspace-Id': wid } : {}),
       ...(opts.headers || {}),
     },
   })
@@ -290,7 +293,7 @@ function KanbanBoard({ tasks, users, onOpen, onStatusChange }) {
         const task = e.active.data.current?.task
         if (overId && task && overId !== task.status) onStatusChange?.(task, overId)
       }}>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+      <div className="kanban-scroll">
         {STATUS_ORDER.map(s => (
           <DroppableColumn key={s} id={s} count={grouped[s].length}>
             {grouped[s].map(t => <DraggableCard key={t.id} task={t} users={users} onOpen={onOpen} />)}
@@ -1274,11 +1277,265 @@ function CreateTaskDialog({ open, onClose, me, groups, onCreated }) {
 }
 
 // ================================================================
+// WELCOME SPLASH
+// ================================================================
+function WelcomeSplash({ name, workspaceName, onDone }) {
+  useEffect(() => {
+    const t = setTimeout(onDone, 1600)
+    return () => clearTimeout(t)
+  }, [])
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-[color:var(--w-bg)]">
+      <div className="text-center" style={{ animation: 'welcomeIn 1600ms cubic-bezier(0.22,1,0.36,1) both' }}>
+        <WhatodoLogo size={64} stroke="#ffffff" className="mx-auto mb-6 anim-logo-breath" />
+        <p className="text-sm text-2 mb-2">Bon retour parmi nous,</p>
+        <h1 className="text-4xl font-bold tracking-tight">{name}</h1>
+        {workspaceName && <p className="text-sm text-2 mt-3">Espace · {workspaceName}</p>}
+      </div>
+    </div>
+  )
+}
+
+// ================================================================
+// ONBOARDING (no workspace yet)
+// ================================================================
+function OnboardingScreen({ user, onCreated, onJoined, onLogout }) {
+  const [mode, setMode] = useState('choose') // choose | create | join
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [color, setColor] = useState('#3b82f6')
+  const [inviteCode, setInviteCode] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const colors = ['#3b82f6', '#8b5cf6', '#ec4899', '#f97316', '#10b981', '#14b8a6', '#eab308', '#ef4444']
+
+  async function createWorkspace() {
+    if (!name.trim()) return toast.error('Nom requis')
+    setLoading(true)
+    try {
+      const ws = await apiFetch('/workspaces', { method: 'POST', body: JSON.stringify({ name, description, color }) })
+      toast.success('Espace créé')
+      onCreated(ws)
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+  }
+  async function joinWorkspace() {
+    if (!inviteCode.trim()) return toast.error('Code requis')
+    setLoading(true)
+    try {
+      const { workspace } = await apiFetch('/workspaces/join', { method: 'POST', body: JSON.stringify({ inviteCode }) })
+      toast.success(`Bienvenue dans ${workspace.name}`)
+      onJoined(workspace)
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-6">
+      <div className="w-full max-w-md anim-fade-up">
+        <div className="flex flex-col items-center mb-10">
+          <WhatodoLogo size={56} stroke="#ffffff" className="mb-5 opacity-95" />
+          <h1 className="text-3xl font-bold tracking-tight">Bienvenue {user.firstName}</h1>
+          <p className="text-sm text-2 mt-2 text-center">Organisez vos projets. Travaillez en équipe. Avancez simplement.</p>
+        </div>
+
+        {mode === 'choose' && (
+          <div className="space-y-2">
+            <button onClick={() => setMode('create')}
+              className="surface surface-interactive w-full p-5 text-left flex items-center gap-4">
+              <div className="w-10 h-10 rounded-xl bg-white/[0.05] flex items-center justify-center">
+                <Plus className="w-5 h-5" />
+              </div>
+              <div className="flex-1">
+                <p className="font-semibold">Créer un espace</p>
+                <p className="text-[12.5px] text-2 mt-0.5">Démarrez un nouveau projet et invitez votre équipe</p>
+              </div>
+              <ArrowUpRight className="w-4 h-4 text-3" />
+            </button>
+            <button onClick={() => setMode('join')}
+              className="surface surface-interactive w-full p-5 text-left flex items-center gap-4">
+              <div className="w-10 h-10 rounded-xl bg-white/[0.05] flex items-center justify-center">
+                <Users className="w-5 h-5" />
+              </div>
+              <div className="flex-1">
+                <p className="font-semibold">Rejoindre un espace</p>
+                <p className="text-[12.5px] text-2 mt-0.5">Utilisez un code d'invitation reçu</p>
+              </div>
+              <ArrowUpRight className="w-4 h-4 text-3" />
+            </button>
+            <button onClick={onLogout} className="w-full text-center text-[12px] text-3 hover:text-white pt-4 transition">
+              Se déconnecter
+            </button>
+          </div>
+        )}
+
+        {mode === 'create' && (
+          <div className="surface p-5 space-y-3 anim-scale">
+            <div>
+              <label className="text-[11px] text-3 mb-1.5 block">Nom de l'espace</label>
+              <input value={name} onChange={e => setName(e.target.value)} placeholder="Ex: Voyage d'étude 2026"
+                className="w-full h-11 px-3 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)] text-white text-sm focus:outline-none focus:border-white/25" />
+            </div>
+            <div>
+              <label className="text-[11px] text-3 mb-1.5 block">Description (optionnelle)</label>
+              <input value={description} onChange={e => setDescription(e.target.value)} placeholder="Ex: Organisation du voyage à Berlin"
+                className="w-full h-10 px-3 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)] text-white text-sm focus:outline-none focus:border-white/25" />
+            </div>
+            <div>
+              <label className="text-[11px] text-3 mb-1.5 block">Couleur</label>
+              <div className="flex gap-2">
+                {colors.map(c => (
+                  <button key={c} onClick={() => setColor(c)}
+                    className={`w-8 h-8 rounded-full transition ${color === c ? 'ring-2 ring-white ring-offset-2 ring-offset-[color:var(--w-surface)] scale-110' : 'opacity-70 hover:opacity-100'}`}
+                    style={{ background: c }} />
+                ))}
+              </div>
+            </div>
+            <div className="flex gap-2 pt-2">
+              <button onClick={() => setMode('choose')} className="h-10 px-4 rounded-xl btn-ghost text-sm flex-1">Retour</button>
+              <button onClick={createWorkspace} disabled={loading}
+                className="h-10 px-4 rounded-xl btn-primary text-sm flex-1 inline-flex items-center justify-center gap-1">
+                {loading && <Loader2 className="w-4 h-4 animate-spin" />} Créer l'espace
+              </button>
+            </div>
+          </div>
+        )}
+
+        {mode === 'join' && (
+          <div className="surface p-5 space-y-3 anim-scale">
+            <div>
+              <label className="text-[11px] text-3 mb-1.5 block">Code d'invitation</label>
+              <input value={inviteCode} onChange={e => setInviteCode(e.target.value.toUpperCase())} placeholder="EPCO-XXXXX"
+                className="w-full h-11 px-3 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)] text-white text-sm font-mono uppercase focus:outline-none focus:border-white/25" />
+              <p className="text-[11px] text-3 mt-1.5">Demandez le code à un membre de l'espace.</p>
+            </div>
+            <div className="flex gap-2 pt-2">
+              <button onClick={() => setMode('choose')} className="h-10 px-4 rounded-xl btn-ghost text-sm flex-1">Retour</button>
+              <button onClick={joinWorkspace} disabled={loading}
+                className="h-10 px-4 rounded-xl btn-primary text-sm flex-1 inline-flex items-center justify-center gap-1">
+                {loading && <Loader2 className="w-4 h-4 animate-spin" />} Rejoindre
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ================================================================
+// WORKSPACE SWITCHER
+// ================================================================
+function WorkspaceSwitcher({ workspaces, active, onSwitch, onOpenCreate, onOpenJoin }) {
+  const [open, setOpen] = useState(false)
+  if (!active) return null
+  return (
+    <div className="relative">
+      <button onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-white/[0.03] transition group">
+        <div className="w-7 h-7 rounded-lg flex items-center justify-center font-bold text-white text-sm shrink-0"
+          style={{ background: active.color || '#3b82f6' }}>
+          {active.icon || active.name[0]}
+        </div>
+        <div className="flex-1 min-w-0 text-left">
+          <p className="text-[13px] font-semibold truncate">{active.name}</p>
+          <p className="text-[10.5px] text-3 truncate">{active.myRole}</p>
+        </div>
+        <ChevronRight className={`w-3.5 h-3.5 text-3 transition ${open ? 'rotate-90' : ''}`} />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 right-0 top-full mt-1 w-glass rounded-xl p-1.5 z-50 anim-scale">
+            {workspaces.map(w => (
+              <button key={w.id}
+                onClick={() => { onSwitch(w); setOpen(false) }}
+                className={`w-full flex items-center gap-2.5 p-2 rounded-lg text-left transition ${
+                  w.id === active.id ? 'bg-white/[0.06]' : 'hover:bg-white/[0.04]'
+                }`}>
+                <div className="w-6 h-6 rounded-md flex items-center justify-center font-bold text-white text-xs shrink-0"
+                  style={{ background: w.color || '#3b82f6' }}>
+                  {w.icon || w.name[0]}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[12.5px] font-medium truncate">{w.name}</p>
+                  <p className="text-[10px] text-3 truncate">{w.myRole} · {w.memberCount || '—'} membres</p>
+                </div>
+                {w.id === active.id && <CheckCircle2 className="w-3.5 h-3.5 text-white/70" />}
+              </button>
+            ))}
+            <div className="border-t border-white/10 mt-1.5 pt-1.5 space-y-0.5">
+              <button onClick={() => { setOpen(false); onOpenCreate() }}
+                className="w-full flex items-center gap-2.5 p-2 rounded-lg text-left hover:bg-white/[0.04] transition text-[12.5px] text-2">
+                <Plus className="w-3.5 h-3.5" /> Créer un espace
+              </button>
+              <button onClick={() => { setOpen(false); onOpenJoin() }}
+                className="w-full flex items-center gap-2.5 p-2 rounded-lg text-left hover:bg-white/[0.04] transition text-[12.5px] text-2">
+                <Users className="w-3.5 h-3.5" /> Rejoindre un espace
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ================================================================
+// INVITE PANEL (workspace settings quick view)
+// ================================================================
+function InvitePanel({ workspace, canManage, onClose, onRegenerated }) {
+  const [copied, setCopied] = useState(false)
+  const [code, setCode] = useState(workspace.inviteCode)
+
+  async function regen() {
+    try {
+      const { inviteCode } = await apiFetch('/workspace/regenerate-code', { method: 'POST' })
+      setCode(inviteCode); onRegenerated?.(inviteCode)
+      toast.success('Nouveau code généré')
+    } catch (e) { toast.error(e.message) }
+  }
+
+  function copyCode() {
+    navigator.clipboard?.writeText(code)
+    setCopied(true); setTimeout(() => setCopied(false), 1500)
+  }
+
+  return (
+    <Dialog open onOpenChange={v => !v && onClose()}>
+      <DialogContent className="w-glass max-w-md rounded-2xl border-white/10">
+        <DialogHeader>
+          <DialogTitle className="text-lg">Inviter dans {workspace.name}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div>
+            <p className="text-[11px] text-3 mb-2">Code d'invitation</p>
+            <div className="surface-flat px-4 py-3 flex items-center gap-3">
+              <span className="text-xl font-mono font-bold tracking-wider flex-1">{code}</span>
+              <button onClick={copyCode} className="h-9 px-3 rounded-lg btn-ghost text-sm">
+                {copied ? 'Copié' : 'Copier'}
+              </button>
+            </div>
+            <p className="text-[11px] text-3 mt-2">Partagez ce code pour que d'autres puissent rejoindre.</p>
+          </div>
+          {canManage && (
+            <button onClick={regen} className="text-[12px] text-2 hover:text-white transition">
+              Regénérer le code
+            </button>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+
+// ================================================================
 // APP SHELL
 // ================================================================
 export default function App() {
   const [me, setMe] = useState(null)
-  const [group, setGroup] = useState(null)
+  const [workspaces, setWorkspaces] = useState([])
+  const [workspace, setWorkspace] = useState(null)
+  const [dashboardMeta, setDashboardMeta] = useState({ group: null, role: null })
   const [loading, setLoading] = useState(true)
   const [view, setView] = useState('dashboard')
   const [users, setUsers] = useState({})
@@ -1288,27 +1545,76 @@ export default function App() {
   const [refreshKey, setRefreshKey] = useState(0)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [viewGroupId, setViewGroupId] = useState(null)
-  const { theme, setTheme } = useTheme()
+  const [showWelcome, setShowWelcome] = useState(false)
+  const [onboardingMode, setOnboardingMode] = useState(null) // 'create' | 'join' | null (opened from switcher)
+  const [invitePanelOpen, setInvitePanelOpen] = useState(false)
 
-  async function bootstrap() {
+  async function loadWorkspaceData() {
+    try {
+      const gs = await apiFetch('/groups')
+      setGroups(gs)
+      const us = await apiFetch('/users')
+      setUsers(Object.fromEntries(us.map(u => [u.id, u])))
+      const dash = await apiFetch('/dashboard').catch(() => null)
+      if (dash) setDashboardMeta({ group: dash.group, role: dash.role })
+    } catch (e) { /* ignore */ }
+  }
+
+  async function bootstrap(withWelcome = false) {
     setLoading(true)
     if (getToken()) {
       try {
-        const { user, group } = await apiFetch('/auth/me')
-        setMe(user); setGroup(group)
-        const gs = await apiFetch('/groups')
-        setGroups(gs)
-        const us = await apiFetch('/users')
-        setUsers(Object.fromEntries(us.map(u => [u.id, u])))
-      } catch { localStorage.removeItem('whatodo_token') }
+        const { user, workspaces: wsList } = await apiFetch('/auth/me')
+        setMe(user)
+        setWorkspaces(wsList || [])
+        if (!wsList || wsList.length === 0) {
+          setWorkspace(null)
+          setLoading(false)
+          return
+        }
+        const saved = localStorage.getItem('whatodo_workspace')
+        const active = wsList.find(w => w.id === saved) || wsList[0]
+        localStorage.setItem('whatodo_workspace', active.id)
+        setWorkspace(active)
+        if (withWelcome) setShowWelcome(true)
+        await loadWorkspaceData()
+      } catch { localStorage.removeItem('whatodo_token'); localStorage.removeItem('whatodo_workspace') }
     }
     setLoading(false)
   }
 
-  useEffect(() => { bootstrap() }, [])
+  useEffect(() => { bootstrap(false) }, [])
 
-  function onLogin() { bootstrap() }
-  function logout() { localStorage.removeItem('whatodo_token'); setMe(null); setView('dashboard') }
+  async function switchWorkspace(w) {
+    localStorage.setItem('whatodo_workspace', w.id)
+    setWorkspace(w)
+    setView('dashboard'); setViewGroupId(null)
+    await loadWorkspaceData()
+    setRefreshKey(k => k + 1)
+    toast.success(`Espace · ${w.name}`)
+  }
+
+  async function onWorkspaceCreated(w) {
+    setWorkspaces(prev => [...prev, w])
+    await switchWorkspace(w)
+    setOnboardingMode(null)
+  }
+
+  async function onWorkspaceJoined(w) {
+    // reload full list to get role/memberCount
+    const wsList = await apiFetch('/workspaces').catch(() => [])
+    setWorkspaces(wsList)
+    const found = wsList.find(x => x.id === w.id)
+    if (found) await switchWorkspace(found)
+    setOnboardingMode(null)
+  }
+
+  function onLogin() { bootstrap(true) }
+  function logout() {
+    localStorage.removeItem('whatodo_token')
+    localStorage.removeItem('whatodo_workspace')
+    setMe(null); setWorkspaces([]); setWorkspace(null); setView('dashboard')
+  }
   function refresh() { setRefreshKey(k => k + 1) }
   function openTask(t) { setTaskOpen(t) }
   function taskUpdated(t) { setTaskOpen(t); refresh() }
@@ -1316,19 +1622,46 @@ export default function App() {
 
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center">
-      <WhatodoLogo size={40} stroke="#ffffff" className="opacity-80" />
+      <WhatodoLogo size={40} stroke="#ffffff" className="opacity-80 anim-logo-breath" />
     </div>
   )
   if (!me) return <LoginScreen onLogin={onLogin} />
 
-  const canValidate = me.role === 'admin' || me.role === 'leader'
+  // Show welcome splash
+  if (showWelcome && workspace) {
+    return <WelcomeSplash name={me.firstName} workspaceName={workspace.name} onDone={() => setShowWelcome(false)} />
+  }
+
+  // No workspace yet → onboarding
+  if (!workspace) {
+    return <OnboardingScreen user={me}
+      onCreated={onWorkspaceCreated}
+      onJoined={onWorkspaceJoined}
+      onLogout={logout} />
+  }
+
+  // Onboarding overlays (from switcher)
+  if (onboardingMode === 'create' || onboardingMode === 'join') {
+    return <OnboardingScreen user={me}
+      onCreated={onWorkspaceCreated}
+      onJoined={onWorkspaceJoined}
+      onLogout={() => setOnboardingMode(null)} />
+  }
+
+  const role = dashboardMeta.role || workspace.myRole
+  const myGroupId = workspace.myGroupId
+  const canValidate = ['owner','admin','leader'].includes(role)
+  const isAdmin = ['owner','admin'].includes(role)
+
+  // Build a `me` object with workspace context for children
+  const meCtx = { ...me, role, groupId: myGroupId }
 
   const NAV = [
     { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { key: 'tasks', label: 'Mes tâches', icon: ListChecks },
-    { key: 'group', label: 'Mon groupe', icon: Users, hidden: !me.groupId },
+    { key: 'group', label: 'Mon groupe', icon: Users, hidden: !myGroupId },
     ...(canValidate ? [{ key: 'validation', label: 'Validation', icon: CheckCheck }] : []),
-    ...(me.role === 'admin' ? [{ key: 'admin_groups', label: 'Tous groupes', icon: Shield }] : []),
+    ...(isAdmin ? [{ key: 'admin_groups', label: 'Tous groupes', icon: Shield }] : []),
     { key: 'calendar', label: 'Calendrier', icon: CalIcon, soon: true },
     { key: 'gantt', label: 'Gantt', icon: GanttChart, soon: true },
     { key: 'chat', label: 'Chat', icon: MessageSquare, soon: true },
@@ -1337,11 +1670,19 @@ export default function App() {
 
   const Sidebar = (
     <div className="flex flex-col h-full">
-      <div className="p-5 flex items-center gap-2.5">
-        <WhatodoLogo size={26} stroke="#ffffff" className="opacity-95" />
-        <p className="font-semibold text-[15px] tracking-tight">Whatodo</p>
+      <div className="p-3 space-y-2 border-b border-[color:var(--w-border)]">
+        <div className="flex items-center gap-2 px-2 pt-1">
+          <WhatodoLogo size={20} stroke="#ffffff" className="opacity-95" />
+          <p className="font-semibold text-[13px] tracking-tight">Whatodo</p>
+        </div>
+        <WorkspaceSwitcher
+          workspaces={workspaces}
+          active={workspace}
+          onSwitch={switchWorkspace}
+          onOpenCreate={() => setOnboardingMode('create')}
+          onOpenJoin={() => setOnboardingMode('join')} />
       </div>
-      <nav className="flex-1 px-3 space-y-0.5 overflow-y-auto">
+      <nav className="flex-1 px-3 py-3 space-y-0.5 overflow-y-auto">
         {NAV.map(n => (
           <button key={n.key}
             onClick={() => !n.soon && goto(n.key)}
@@ -1352,13 +1693,20 @@ export default function App() {
             {n.soon && <span className="text-[9px] uppercase tracking-widest text-3">soon</span>}
           </button>
         ))}
+        {isAdmin && (
+          <button onClick={() => setInvitePanelOpen(true)}
+            className="nav-item w-full mt-2 border border-dashed border-[color:var(--w-border)]">
+            <Plus className="w-4 h-4 shrink-0" />
+            <span className="flex-1 text-left">Inviter</span>
+          </button>
+        )}
       </nav>
-      <div className="p-3">
-        <div className="flex items-center gap-2.5 p-2 rounded-xl hover:bg-white/[0.03] transition cursor-pointer">
+      <div className="p-3 border-t border-[color:var(--w-border)]">
+        <div className="flex items-center gap-2.5 p-2 rounded-xl hover:bg-white/[0.03] transition">
           <UserAvatar user={me} size={32} />
           <div className="flex-1 min-w-0">
             <p className="text-[13px] font-medium truncate">{me.firstName}</p>
-            <p className="text-[10.5px] text-3 truncate">{ROLE_LABEL[me.role]}</p>
+            <p className="text-[10.5px] text-3 truncate">{ROLE_LABEL[role] || role}</p>
           </div>
           <button onClick={logout} className="icon-btn" title="Déconnexion">
             <LogOut className="w-3.5 h-3.5" />
@@ -1370,9 +1718,9 @@ export default function App() {
 
   const currentView = (() => {
     switch (view) {
-      case 'dashboard': return <DashboardView me={me} group={group} users={users} onOpenTask={openTask} onNavigate={goto} onCreate={() => setCreateOpen(true)} />
-      case 'tasks': return <TasksView me={me} users={users} onOpenTask={openTask} refreshKey={refreshKey} />
-      case 'group': return <GroupView me={me} users={users} onOpenTask={openTask} refreshKey={refreshKey} groupId={viewGroupId} onCreate={() => setCreateOpen(true)} />
+      case 'dashboard': return <DashboardView me={meCtx} group={dashboardMeta.group} users={users} onOpenTask={openTask} onNavigate={goto} onCreate={() => setCreateOpen(true)} />
+      case 'tasks': return <TasksView me={meCtx} users={users} onOpenTask={openTask} refreshKey={refreshKey} />
+      case 'group': return <GroupView me={meCtx} users={users} onOpenTask={openTask} refreshKey={refreshKey} groupId={viewGroupId} onCreate={() => setCreateOpen(true)} />
       case 'validation': return <ValidationView users={users} groups={groups} onOpenTask={openTask} refreshKey={refreshKey} />
       case 'admin_groups': return <AllGroupsView groups={groups} onOpenGroup={gid => { setViewGroupId(gid); setView('group') }} />
       default: return (
@@ -1388,7 +1736,7 @@ export default function App() {
   return (
     <div className="min-h-screen flex">
       {/* Desktop sidebar */}
-      <aside className="hidden md:flex md:flex-col w-[220px] fixed inset-y-0 left-0 border-r border-[color:var(--w-border)] bg-[color:var(--w-bg)] z-30">
+      <aside className="hidden md:flex md:flex-col w-[240px] fixed inset-y-0 left-0 border-r border-[color:var(--w-border)] bg-[color:var(--w-bg)] z-30">
         {Sidebar}
       </aside>
 
@@ -1396,21 +1744,24 @@ export default function App() {
       {sidebarOpen && (
         <>
           <div className="fixed inset-0 bg-black/70 z-40 md:hidden anim-fade" onClick={() => setSidebarOpen(false)} />
-          <aside className="fixed inset-y-0 left-0 w-[260px] bg-[color:var(--w-bg)] border-r border-[color:var(--w-border)] z-50 md:hidden anim-fade">
+          <aside className="fixed inset-y-0 left-0 w-[280px] bg-[color:var(--w-bg)] border-r border-[color:var(--w-border)] z-50 md:hidden anim-fade">
             {Sidebar}
           </aside>
         </>
       )}
 
-      <main className="flex-1 md:ml-[220px] min-w-0 pb-24 md:pb-8 relative z-10">
+      <main className="flex-1 md:ml-[240px] min-w-0 pb-24 md:pb-8 relative z-10">
         {/* Mobile top bar */}
         <div className="md:hidden sticky top-0 z-20 bg-[color:var(--w-bg)]/90 backdrop-blur-md px-4 py-3 flex items-center justify-between border-b border-[color:var(--w-border)]">
           <button onClick={() => setSidebarOpen(true)} className="icon-btn">
             <Menu className="w-4 h-4" />
           </button>
-          <div className="flex items-center gap-2">
-            <WhatodoLogo size={20} stroke="#ffffff" />
-            <p className="font-semibold text-sm">Whatodo</p>
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="w-5 h-5 rounded-md flex items-center justify-center font-bold text-white text-[10px] shrink-0"
+              style={{ background: workspace.color || '#3b82f6' }}>
+              {workspace.icon || workspace.name[0]}
+            </div>
+            <p className="font-semibold text-sm truncate">{workspace.name}</p>
           </div>
           <button onClick={() => setCreateOpen(true)} className="w-9 h-9 rounded-xl btn-primary flex items-center justify-center">
             <Plus className="w-4 h-4" />
@@ -1423,22 +1774,35 @@ export default function App() {
 
         {/* Mobile bottom nav (glass) */}
         <nav className="md:hidden fixed bottom-3 inset-x-3 z-30 w-glass rounded-2xl p-1.5 flex justify-around">
-          {bottomNav.map(n => (
-            <button key={n.key} onClick={() => goto(n.key)}
-              className={`flex-1 flex flex-col items-center py-2 gap-0.5 rounded-xl transition ${
-                view === n.key ? 'bg-white text-[#0a1428]' : 'text-2'
-              }`}>
-              <n.icon className="w-4 h-4" />
-              <span className="text-[10px] font-medium">{n.label.split(' ')[0]}</span>
-            </button>
-          ))}
+          {bottomNav.map(n => {
+            const shortLabel = n.key === 'dashboard' ? 'Accueil'
+              : n.key === 'tasks' ? 'Tâches'
+              : n.key === 'group' ? 'Groupe'
+              : n.key === 'validation' ? 'Valider'
+              : n.key === 'admin_groups' ? 'Espace'
+              : n.label
+            return (
+              <button key={n.key} onClick={() => goto(n.key)} aria-label={n.label}
+                className={`flex-1 min-w-0 flex flex-col items-center py-2 gap-0.5 rounded-xl transition ${
+                  view === n.key ? 'bg-white text-[#0a1428]' : 'text-2'
+                }`}>
+                <n.icon className="w-4 h-4" />
+                <span className="text-[10px] font-medium truncate max-w-full px-1">{shortLabel}</span>
+              </button>
+            )
+          })}
         </nav>
       </main>
 
       <TaskDialog task={taskOpen} open={!!taskOpen} onClose={() => setTaskOpen(null)}
-        me={me} users={users} groups={groups} onUpdated={taskUpdated} />
+        me={meCtx} users={users} groups={groups} onUpdated={taskUpdated} />
       <CreateTaskDialog open={createOpen} onClose={() => setCreateOpen(false)}
-        me={me} groups={groups} onCreated={() => refresh()} />
+        me={meCtx} groups={groups} onCreated={() => refresh()} />
+      {invitePanelOpen && (
+        <InvitePanel workspace={workspace} canManage={isAdmin}
+          onClose={() => setInvitePanelOpen(false)}
+          onRegenerated={code => setWorkspace(w => ({ ...w, inviteCode: code }))} />
+      )}
     </div>
   )
 }
