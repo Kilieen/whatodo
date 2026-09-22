@@ -7,6 +7,7 @@ import {
   DndContext, PointerSensor, TouchSensor, useSensor, useSensors, DragOverlay, closestCorners
 } from '@dnd-kit/core'
 import { useDroppable, useDraggable } from '@dnd-kit/core'
+import { snapCenterToCursor } from '@dnd-kit/modifiers'
 import {
   LayoutDashboard, ListChecks, Users, MessageSquare, Calendar as CalIcon,
   Bell, LogOut, Moon, Sun, Plus, ChevronLeft, ChevronRight, Menu, X,
@@ -205,14 +206,18 @@ function LoginScreen({ onLogin }) {
 // ================================================================
 // TASK CARD (compact)
 // ================================================================
-function TaskCard({ task, users, onOpen, isDragging }) {
+function TaskCard({ task, users, onOpen, isDragging, isOverlay }) {
   const assignees = (task.assignees || []).map(id => users[id]).filter(Boolean)
   const overdue = isOverdue(task)
   return (
     <div
-      onClick={() => onOpen?.(task)}
-      className={`group rounded-xl border border-[color:var(--w-border)] bg-[color:var(--w-surface)] p-3 cursor-pointer transition-all
-        hover:border-white/15 hover:bg-[color:var(--w-surface-2)] ${isDragging ? 'shadow-2xl ring-1 ring-white/20 rotate-1 scale-[1.02]' : ''}`}>
+      onClick={onOpen ? (e) => { e.stopPropagation(); onOpen(task) } : undefined}
+      className={`group rounded-xl border p-3 transition-colors
+        ${isOverlay
+          ? 'border-white/25 bg-[color:var(--w-surface-2)] shadow-2xl cursor-grabbing'
+          : 'border-[color:var(--w-border)] bg-[color:var(--w-surface)] cursor-pointer hover:border-white/15 hover:bg-[color:var(--w-surface-2)]'
+        }
+        ${isDragging && !isOverlay ? 'opacity-0' : ''}`}>
       <div className="flex items-start gap-2 mb-3">
         <span className={`dot ${STATUS[task.status].dot} mt-1.5`} />
         <p className="text-[13.5px] font-medium leading-snug text-white flex-1">{task.title}</p>
@@ -244,10 +249,9 @@ function TaskCard({ task, users, onOpen, isDragging }) {
 // ================================================================
 function DraggableCard({ task, users, onOpen }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: task.id, data: { task } })
-  const style = { opacity: isDragging ? 0 : 1 }
   return (
-    <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
-      <TaskCard task={task} users={users} onOpen={onOpen} />
+    <div ref={setNodeRef} {...attributes} {...listeners} className="touch-none">
+      <TaskCard task={task} users={users} onOpen={onOpen} isDragging={isDragging} />
     </div>
   )
 }
@@ -256,7 +260,7 @@ function DroppableColumn({ id, children, count }) {
   const { setNodeRef, isOver } = useDroppable({ id })
   return (
     <div ref={setNodeRef}
-      className={`rounded-2xl p-3 min-h-[320px] transition-all border ${
+      className={`rounded-2xl p-3 min-h-[320px] transition-colors border ${
         isOver ? 'border-white/25 bg-white/[0.02]' : 'border-transparent'
       }`}>
       <div className="flex items-center justify-between mb-3 px-1">
@@ -274,9 +278,10 @@ function DroppableColumn({ id, children, count }) {
 
 function KanbanBoard({ tasks, users, onOpen, onStatusChange }) {
   const [activeTask, setActiveTask] = useState(null)
+  const [overlayWidth, setOverlayWidth] = useState(null)
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } }),
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 8 } }),
   )
   const grouped = useMemo(() => {
     const g = { todo: [], in_progress: [], review: [], blocked: [], done: [] }
@@ -286,9 +291,16 @@ function KanbanBoard({ tasks, users, onOpen, onStatusChange }) {
 
   return (
     <DndContext sensors={sensors} collisionDetection={closestCorners}
-      onDragStart={e => setActiveTask(e.active.data.current?.task)}
+      modifiers={[snapCenterToCursor]}
+      onDragStart={e => {
+        setActiveTask(e.active.data.current?.task)
+        // Measure the source card width for the overlay
+        const node = e.active.rect?.current?.initial
+        if (node?.width) setOverlayWidth(node.width)
+      }}
+      onDragCancel={() => { setActiveTask(null); setOverlayWidth(null) }}
       onDragEnd={e => {
-        setActiveTask(null)
+        setActiveTask(null); setOverlayWidth(null)
         const overId = e.over?.id
         const task = e.active.data.current?.task
         if (overId && task && overId !== task.status) onStatusChange?.(task, overId)
@@ -301,8 +313,12 @@ function KanbanBoard({ tasks, users, onOpen, onStatusChange }) {
           </DroppableColumn>
         ))}
       </div>
-      <DragOverlay dropAnimation={{ duration: 200 }}>
-        {activeTask ? <TaskCard task={activeTask} users={users} isDragging /> : null}
+      <DragOverlay dropAnimation={null} zIndex={9999}>
+        {activeTask ? (
+          <div style={{ width: overlayWidth ? `${overlayWidth}px` : undefined, pointerEvents: 'none' }}>
+            <TaskCard task={activeTask} users={users} isOverlay />
+          </div>
+        ) : null}
       </DragOverlay>
     </DndContext>
   )
@@ -1277,20 +1293,228 @@ function CreateTaskDialog({ open, onClose, me, groups, onCreated }) {
 }
 
 // ================================================================
-// WELCOME SPLASH
+// MEMBERS MANAGEMENT
 // ================================================================
-function WelcomeSplash({ name, workspaceName, onDone }) {
+const ROLES_META = [
+  { key: 'owner',   label: 'Owner',   desc: 'Tous les droits · gestion complète du workspace' },
+  { key: 'admin',   label: 'Admin',   desc: 'Peut tout gérer sauf suppression du workspace' },
+  { key: 'leader',  label: 'Chef',    desc: 'Gère son groupe · assigne · valide' },
+  { key: 'member',  label: 'Membre',  desc: 'Accès à ses tâches · commente · dépose preuves' },
+  { key: 'teacher', label: 'Enseignant', desc: 'Lecture globale · peut commenter' },
+  { key: 'viewer',  label: 'Viewer',  desc: 'Lecture seule' },
+]
+
+function MembersView({ workspace, canManage, refreshKey, onRefresh }) {
+  const [members, setMembers] = useState([])
+  const [groups, setGroups] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [q, setQ] = useState('')
+  const [editing, setEditing] = useState(null) // {member}
+
+  async function load() {
+    setLoading(true)
+    try {
+      const [ms, gs] = await Promise.all([
+        apiFetch('/workspace/members'),
+        apiFetch('/groups'),
+      ])
+      setMembers(ms); setGroups(gs)
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+  }
+  useEffect(() => { load() }, [refreshKey])
+
+  async function updateMember(m, patch) {
+    try {
+      await apiFetch(`/workspace/members/${m.id}`, { method: 'PATCH', body: JSON.stringify(patch) })
+      toast.success('Membre mis à jour')
+      load(); onRefresh?.()
+    } catch (e) { toast.error(e.message) }
+  }
+
+  async function removeMember(m) {
+    if (!window.confirm(`Retirer ${m.user?.firstName} de l'espace ?`)) return
+    try {
+      await apiFetch(`/workspace/members/${m.id}`, { method: 'DELETE' })
+      toast.success('Retiré')
+      load(); onRefresh?.()
+    } catch (e) { toast.error(e.message) }
+  }
+
+  const filtered = members.filter(m => {
+    if (!q) return true
+    const s = q.toLowerCase()
+    return m.user?.firstName?.toLowerCase().includes(s) || m.user?.email?.toLowerCase().includes(s)
+  })
+
+  const roleColor = {
+    owner: 'text-amber-300 bg-amber-400/10 border-amber-400/25',
+    admin: 'text-purple-300 bg-purple-400/10 border-purple-400/25',
+    leader: 'text-blue-300 bg-blue-400/10 border-blue-400/25',
+    member: 'text-white/70 bg-white/[0.05] border-white/10',
+    teacher: 'text-emerald-300 bg-emerald-400/10 border-emerald-400/25',
+    viewer: 'text-white/50 bg-white/[0.03] border-white/10',
+  }
+
+  return (
+    <div className="space-y-5 anim-fade-up">
+      <div className="flex items-end justify-between flex-wrap gap-3">
+        <div>
+          <p className="text-sm text-2 mb-1">Espace · {workspace.name}</p>
+          <h1 className="t-h1">Membres</h1>
+          <p className="text-sm text-2 mt-2">{members.length} personne(s) · gérez rôles, groupes et accès</p>
+        </div>
+        <div className="relative">
+          <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-3" />
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Rechercher un membre…"
+            className="h-9 pl-8 pr-3 rounded-full bg-[color:var(--w-surface)] border border-[color:var(--w-border)] text-[12.5px] focus:outline-none focus:border-white/20 w-56" />
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="p-12 flex justify-center"><Loader2 className="animate-spin text-white/30" /></div>
+      ) : (
+        <div className="surface divide-y divide-[color:var(--w-border)] overflow-hidden">
+          {filtered.map(m => (
+            <div key={m.id} className="flex items-center gap-3 px-4 py-3 hover:bg-white/[0.02] transition">
+              <UserAvatar user={m.user} size={36} />
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-[14px] truncate">{m.user?.firstName}</p>
+                <p className="text-[11.5px] text-3 truncate">{m.user?.email}</p>
+              </div>
+              <span className={`text-[10.5px] px-2 py-0.5 rounded-md border ${roleColor[m.role] || roleColor.member}`}>
+                {ROLES_META.find(r => r.key === m.role)?.label || m.role}
+              </span>
+              <span className="text-[12px] text-2 min-w-[110px] hidden sm:block">
+                {m.group ? m.group.name : <span className="text-3">sans groupe</span>}
+              </span>
+              {canManage ? (
+                <button onClick={() => setEditing(m)}
+                  className="icon-btn" title="Gérer">
+                  <MoreHorizontal className="w-4 h-4" />
+                </button>
+              ) : (
+                <div className="w-9" />
+              )}
+            </div>
+          ))}
+          {filtered.length === 0 && <div className="p-8 text-center text-sm text-2">Aucun membre trouvé.</div>}
+        </div>
+      )}
+
+      {editing && (
+        <MemberEditDialog member={editing} groups={groups}
+          onClose={() => setEditing(null)}
+          onUpdate={(patch) => updateMember(editing, patch)}
+          onRemove={() => { removeMember(editing); setEditing(null) }}
+          canManage={canManage} />
+      )}
+    </div>
+  )
+}
+
+function MemberEditDialog({ member, groups, onClose, onUpdate, onRemove, canManage }) {
+  const [role, setRole] = useState(member.role)
+  const [groupId, setGroupId] = useState(member.groupId || '')
+
+  async function save() {
+    const patch = {}
+    if (role !== member.role) patch.role = role
+    if ((groupId || null) !== (member.groupId || null)) patch.groupId = groupId || null
+    if (Object.keys(patch).length === 0) { onClose(); return }
+    await onUpdate(patch)
+    onClose()
+  }
+
+  return (
+    <Dialog open onOpenChange={v => !v && onClose()}>
+      <DialogContent className="w-glass max-w-lg rounded-2xl border-white/10">
+        <DialogHeader>
+          <div className="flex items-center gap-3">
+            <UserAvatar user={member.user} size={40} />
+            <div>
+              <DialogTitle className="text-lg">{member.user?.firstName}</DialogTitle>
+              <p className="text-[12px] text-3">{member.user?.email}</p>
+            </div>
+          </div>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div>
+            <p className="text-[11px] text-3 mb-2">Rôle</p>
+            <div className="space-y-1.5">
+              {ROLES_META.map(r => (
+                <button key={r.key} onClick={() => canManage && setRole(r.key)}
+                  disabled={!canManage}
+                  className={`w-full text-left p-3 rounded-xl border transition ${
+                    role === r.key
+                      ? 'border-white/30 bg-white/[0.05]'
+                      : 'border-[color:var(--w-border)] hover:border-white/15'
+                  } ${!canManage ? 'opacity-60 cursor-not-allowed' : ''}`}>
+                  <div className="flex items-center gap-2">
+                    <span className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                      role === r.key ? 'border-white' : 'border-white/30'
+                    }`}>
+                      {role === r.key && <span className="w-1.5 h-1.5 rounded-full bg-white" />}
+                    </span>
+                    <span className="font-medium text-[13.5px]">{r.label}</span>
+                  </div>
+                  <p className="text-[11.5px] text-2 mt-1 ml-6">{r.desc}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <p className="text-[11px] text-3 mb-2">Groupe</p>
+            <Select value={groupId || 'none'} onValueChange={v => setGroupId(v === 'none' ? '' : v)} disabled={!canManage}>
+              <SelectTrigger className="h-10 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="w-glass border-white/10">
+                <SelectItem value="none">— Sans groupe —</SelectItem>
+                {groups.map(g => <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="p-3 rounded-xl border border-[color:var(--w-border)]">
+            <p className="text-[11.5px] text-2">
+              <strong className="text-white">Permissions</strong> — appliquées automatiquement selon le rôle choisi.
+              La personnalisation par membre arrive dans la prochaine version.
+            </p>
+          </div>
+        </div>
+
+        <DialogFooter className="flex-row justify-between sm:justify-between">
+          {canManage && (
+            <button onClick={onRemove} className="h-9 px-4 rounded-xl btn-ghost text-red-300 hover:text-red-200 text-sm inline-flex items-center gap-1">
+              <X className="w-4 h-4" /> Retirer
+            </button>
+          )}
+          <div className="flex gap-2 ml-auto">
+            <button onClick={onClose} className="h-9 px-4 rounded-xl btn-ghost text-sm">Annuler</button>
+            {canManage && (
+              <button onClick={save} className="h-9 px-4 rounded-xl btn-primary text-sm">Enregistrer</button>
+            )}
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+
+function WelcomeSplash({ name, onDone }) {
   useEffect(() => {
-    const t = setTimeout(onDone, 1600)
+    const reduce = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    const t = setTimeout(onDone, reduce ? 300 : 1000)
     return () => clearTimeout(t)
   }, [])
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-[color:var(--w-bg)]">
-      <div className="text-center" style={{ animation: 'welcomeIn 1600ms cubic-bezier(0.22,1,0.36,1) both' }}>
-        <WhatodoLogo size={64} stroke="#ffffff" className="mx-auto mb-6 anim-logo-breath" />
-        <p className="text-sm text-2 mb-2">Bon retour parmi nous,</p>
-        <h1 className="text-4xl font-bold tracking-tight">{name}</h1>
-        {workspaceName && <p className="text-sm text-2 mt-3">Espace · {workspaceName}</p>}
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-[color:var(--w-bg)] anim-splash-out">
+      <div className="flex flex-col items-center gap-5">
+        <WhatodoLogo size={48} stroke="#ffffff" className="opacity-90 anim-splash-logo" />
+        <p className="text-2xl font-semibold tracking-tight anim-splash-name">{name}</p>
       </div>
     </div>
   )
@@ -1629,7 +1853,7 @@ export default function App() {
 
   // Show welcome splash
   if (showWelcome && workspace) {
-    return <WelcomeSplash name={me.firstName} workspaceName={workspace.name} onDone={() => setShowWelcome(false)} />
+    return <WelcomeSplash name={me.firstName} onDone={() => setShowWelcome(false)} />
   }
 
   // No workspace yet → onboarding
@@ -1662,6 +1886,7 @@ export default function App() {
     { key: 'group', label: 'Mon groupe', icon: Users, hidden: !myGroupId },
     ...(canValidate ? [{ key: 'validation', label: 'Validation', icon: CheckCheck }] : []),
     ...(isAdmin ? [{ key: 'admin_groups', label: 'Tous groupes', icon: Shield }] : []),
+    { key: 'members', label: 'Membres', icon: UserIcon },
     { key: 'calendar', label: 'Calendrier', icon: CalIcon, soon: true },
     { key: 'gantt', label: 'Gantt', icon: GanttChart, soon: true },
     { key: 'chat', label: 'Chat', icon: MessageSquare, soon: true },
@@ -1723,6 +1948,7 @@ export default function App() {
       case 'group': return <GroupView me={meCtx} users={users} onOpenTask={openTask} refreshKey={refreshKey} groupId={viewGroupId} onCreate={() => setCreateOpen(true)} />
       case 'validation': return <ValidationView users={users} groups={groups} onOpenTask={openTask} refreshKey={refreshKey} />
       case 'admin_groups': return <AllGroupsView groups={groups} onOpenGroup={gid => { setViewGroupId(gid); setView('group') }} />
+      case 'members': return <MembersView workspace={workspace} canManage={isAdmin} refreshKey={refreshKey} onRefresh={() => { loadWorkspaceData(); refresh() }} />
       default: return (
         <div className="anim-fade-up surface p-16 text-center">
           <p className="text-sm text-2">Cette section arrive bientôt.</p>

@@ -171,6 +171,76 @@ async function handleRoute(request, { params }) {
       return json({ inviteCode: newCode })
     }
 
+    // ============ MEMBERS MANAGEMENT ============
+    if (route === '/workspace/members' && method === 'GET') {
+      const members = await db.collection('workspace_members').find({ workspaceId: workspace.id }).toArray()
+      const userIds = members.map(m => m.userId)
+      const users = await db.collection('users').find({ id: { $in: userIds } }).toArray()
+      const usersById = Object.fromEntries(users.map(u => [u.id, strip(u)]))
+      const groups = await db.collection('groups').find({ workspaceId: workspace.id }).toArray()
+      const groupsById = Object.fromEntries(groups.map(g => [g.id, { id: g.id, name: g.name }]))
+      return json(members.map(m => ({
+        ...m, _id: undefined,
+        user: usersById[m.userId] || null,
+        group: m.groupId ? groupsById[m.groupId] : null,
+      })))
+    }
+
+    const memMatch = route.match(/^\/workspace\/members\/([^/]+)$/)
+    if (memMatch && method === 'PATCH') {
+      if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
+      const memberId = memMatch[1]
+      const target = await db.collection('workspace_members').findOne({ id: memberId, workspaceId: workspace.id })
+      if (!target) return err('Membre introuvable', 404)
+      // Cannot demote yourself if you're the only owner
+      const body = await request.json()
+      const update = {}
+      if ('role' in body) {
+        if (['owner','admin','leader','member','teacher','viewer'].includes(body.role)) update.role = body.role
+        // Protect last owner
+        if (target.role === 'owner' && body.role !== 'owner') {
+          const owners = await db.collection('workspace_members').countDocuments({ workspaceId: workspace.id, role: 'owner', status: 'active' })
+          if (owners <= 1) return err('Impossible de rétrograder le dernier owner', 400)
+        }
+      }
+      if ('groupId' in body) {
+        if (body.groupId === null || body.groupId === '') update.groupId = null
+        else {
+          const g = await db.collection('groups').findOne({ id: body.groupId, workspaceId: workspace.id })
+          if (!g) return err('Groupe introuvable', 404)
+          update.groupId = body.groupId
+        }
+      }
+      if ('status' in body && ['active','inactive'].includes(body.status)) update.status = body.status
+      await db.collection('workspace_members').updateOne({ id: memberId }, { $set: update })
+      // If groupId changed, also sync legacy groups.memberIds and leaderId if role becomes leader
+      if ('groupId' in update) {
+        // remove from all groups memberIds in this workspace, then add to new
+        await db.collection('groups').updateMany({ workspaceId: workspace.id, memberIds: target.userId }, { $pull: { memberIds: target.userId } })
+        if (update.groupId) {
+          await db.collection('groups').updateOne({ id: update.groupId }, { $addToSet: { memberIds: target.userId } })
+        }
+      }
+      if (update.role === 'leader' && (update.groupId || target.groupId)) {
+        const gid = update.groupId || target.groupId
+        await db.collection('groups').updateOne({ id: gid }, { $set: { leaderId: target.userId } })
+      }
+      return json({ ok: true })
+    }
+    if (memMatch && method === 'DELETE') {
+      if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
+      const memberId = memMatch[1]
+      const target = await db.collection('workspace_members').findOne({ id: memberId, workspaceId: workspace.id })
+      if (!target) return err('Membre introuvable', 404)
+      if (target.role === 'owner') {
+        const owners = await db.collection('workspace_members').countDocuments({ workspaceId: workspace.id, role: 'owner', status: 'active' })
+        if (owners <= 1) return err('Impossible de retirer le dernier owner', 400)
+      }
+      await db.collection('workspace_members').deleteOne({ id: memberId })
+      await db.collection('groups').updateMany({ workspaceId: workspace.id }, { $pull: { memberIds: target.userId } })
+      return json({ ok: true })
+    }
+
     // ============ USERS (workspace-scoped) ============
     if (route === '/users' && method === 'GET') {
       const members = await db.collection('workspace_members').find({ workspaceId: workspace.id, status: 'active' }).toArray()
