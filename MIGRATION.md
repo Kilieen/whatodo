@@ -345,3 +345,75 @@ Remove the 3.5-second polling in `ChatView`.
 - **Domain**: ~10€/year
 
 Total: **~1€/month** for a class of 20 users.
+
+
+---
+
+## Post-migration backlog (do NOT do on Emergent)
+
+These items were intentionally deferred so we could exit Emergent cleanly. They are safer / easier to build on the target stack.
+
+### 1. Refactor monolithic files
+Today `app/page.js` (~3500 LoC) and `app/api/[[...path]]/route.js` (~1000 LoC) are single files. Post-migration, split by feature:
+
+```
+features/
+├── auth/            (SupabaseAuthProvider, login, signup, reset)
+├── workspaces/      (workspace-switcher, settings, invitations, audit)
+├── tasks/           (task-dialog, create-task, kanban, list)
+├── calendar/        (month/week/day views)
+├── gantt/           (interactive bars)
+├── chat/            (channels, message-list, realtime hook)
+├── notifications/   (list, prefs, toaster)
+├── members/         (members-view, role-editor)
+└── profile/         (account, prefs, danger zone)
+lib/
+├── supabase/        (client, server, admin)
+services/            (typed data-access layer)
+hooks/               (useTasks, useMembers, useChannels)
+```
+
+Add unit tests (Vitest) and integration tests (Playwright) once split.
+
+### 2. Global search
+Add a top-bar search across tasks, members, groups, messages using Postgres full-text search + `pg_trgm`:
+
+```sql
+CREATE INDEX tasks_title_trgm ON tasks USING gin (title gin_trgm_ops);
+CREATE INDEX messages_content_fts ON messages USING gin (to_tsvector('french', content));
+```
+
+Frontend: single `Cmd/Ctrl+K` palette.
+
+### 3. Chat advanced features (Realtime + Storage backed)
+- Replace 3.5 s polling with Supabase Realtime channels
+- Emoji reactions (new `message_reactions` table)
+- Threads / replies (`replyToId` already exists on the message model — expose thread UI)
+- Attachments via Supabase Storage bucket `chat-attachments/`
+- Typing indicators & presence (Realtime presence API)
+- Better unread counters using `last_read_at` on the client, updated live
+
+### 4. Email delivery
+Structural endpoints exist:
+- `POST /auth/forgot-password` → creates a `password_resets` row, no email sent today
+- Workspace invitations → token created, email delivery deferred
+
+Wire either:
+- **Supabase Auth built-in emails** (simplest — password reset, email verification)
+- **Resend / SendGrid** for workspace invitation emails (`EMAIL_FROM` env var)
+
+### 5. File uploads via Storage
+Today the app stores every uploaded image (proofs, avatars, workspace logos) as **base64 inside MongoDB**. This is fine for a demo but will bloat the DB. Post-migration:
+
+- Create `avatars`, `workspace-logos`, `task-proofs` buckets in Supabase Storage
+- Replace the `fileData` field on `proofs` with a signed URL
+- Enforce per-workspace RLS policies on Storage
+
+### 6. Push notifications (PWA)
+The service worker is already registered. Add `web-push` server-side + VAPID keys, and hook into the existing `notifications` table to fan out browser push messages.
+
+### 7. Interactive Gantt polish
+The Gantt already supports **move + resize** (`PATCH /tasks/:id/dates`). Post-migration, add:
+- Dependency arrows (task A → task B) using the existing `dependencies` field
+- Snap to weekends / working days
+- Multi-select drag

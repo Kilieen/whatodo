@@ -1,12 +1,11 @@
 import { NextResponse } from 'next/server'
 import { v4 as uuidv4 } from 'uuid'
 import { getDb } from '@/lib/mongo'
-import {
-  signToken, comparePassword, hashPassword,
+import { signToken, comparePassword, hashPassword,
   requireUser, requireWorkspace,
   canManageWorkspace, canManageGroupTasks, canViewTask
 } from '@/lib/authz'
-import { ensureSeedAndMigration, makeInviteCode } from '@/lib/seed'
+import { makeInviteCode, ensureDefaultChannels, audit } from '@/lib/seed'
 
 function cors(res) {
   res.headers.set('Access-Control-Allow-Origin', '*')
@@ -36,7 +35,6 @@ async function handleRoute(request, { params }) {
   const route = '/' + path.join('/')
   const method = request.method
   const db = await getDb()
-  await ensureSeedAndMigration(db)
 
   try {
     // ============ AUTH ============
@@ -54,13 +52,21 @@ async function handleRoute(request, { params }) {
       const body = await request.json()
       const email = (body.email || '').toLowerCase().trim()
       if (!email || !body.password || !body.firstName) return err('Champs requis manquants', 400)
+      if ((body.password || '').length < 8) return err('Le mot de passe doit contenir au moins 8 caractères', 400)
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return err('Email invalide', 400)
       const exists = await db.collection('users').findOne({ email })
       if (exists) return err('Un compte existe déjà avec cet email', 400)
       const passwordHash = await hashPassword(body.password)
       const user = {
         id: uuidv4(), email, passwordHash,
         firstName: body.firstName, lastName: body.lastName || '',
-        avatarColor: '#3a5375',
+        avatarColor: body.avatarColor || '#3a5375',
+        avatar: body.avatar || null,
+        timezone: body.timezone || 'Europe/Zurich',
+        locale: body.locale || 'fr',
+        theme: 'dark',
+        notifPrefs: { taskAssigned: true, taskValidated: true, mentions: true, comments: true, deadlines: true },
+        tutorialSeen: false,
         createdAt: new Date(),
         role: 'student', groupId: null,
       }
@@ -85,9 +91,85 @@ async function handleRoute(request, { params }) {
       return json({ user, workspaces })
     }
 
-    if (route === '/auth/users-list' && method === 'GET') {
-      const users = await db.collection('users').find({}).sort({ firstName: 1 }).toArray()
-      return json(users.map(u => ({ email: u.email, firstName: u.firstName, role: u.role })))
+    if (route === '/auth/me' && method === 'PATCH') {
+      const user = await requireUser(request, db)
+      if (!user) return err('Non authentifié', 401)
+      const body = await request.json()
+      const allowed = {}
+      const fields = ['firstName', 'lastName', 'avatar', 'avatarColor', 'timezone', 'locale', 'theme', 'notifPrefs', 'tutorialSeen', 'bio', 'displayName']
+      for (const f of fields) if (f in body) allowed[f] = body[f]
+      if ('email' in body) {
+        const email = (body.email || '').toLowerCase().trim()
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return err('Email invalide', 400)
+        const dup = await db.collection('users').findOne({ email, id: { $ne: user.id } })
+        if (dup) return err('Cet email est déjà utilisé', 400)
+        allowed.email = email
+      }
+      allowed.updatedAt = new Date()
+      await db.collection('users').updateOne({ id: user.id }, { $set: allowed })
+      const u = await db.collection('users').findOne({ id: user.id })
+      return json({ user: strip(u) })
+    }
+
+    if (route === '/auth/change-password' && method === 'POST') {
+      const user = await requireUser(request, db)
+      if (!user) return err('Non authentifié', 401)
+      const body = await request.json()
+      if (!body.currentPassword || !body.newPassword) return err('Champs requis', 400)
+      if (body.newPassword.length < 8) return err('Nouveau mot de passe trop court (min. 8 caractères)', 400)
+      const full = await db.collection('users').findOne({ id: user.id })
+      const ok = await comparePassword(body.currentPassword, full.passwordHash)
+      if (!ok) return err('Mot de passe actuel incorrect', 401)
+      const passwordHash = await hashPassword(body.newPassword)
+      await db.collection('users').updateOne({ id: user.id }, { $set: { passwordHash, updatedAt: new Date() } })
+      return json({ ok: true })
+    }
+
+    if (route === '/auth/forgot-password' && method === 'POST') {
+      // Structural only \u2014 real email flow will be handled by Supabase Auth after migration.
+      // We store the reset token so the flow can be completed once emails are wired.
+      const body = await request.json().catch(() => ({}))
+      const email = (body.email || '').toLowerCase().trim()
+      if (!email) return err('Email requis', 400)
+      const user = await db.collection('users').findOne({ email })
+      if (user) {
+        const token = uuidv4()
+        await db.collection('password_resets').insertOne({
+          id: uuidv4(), userId: user.id, token,
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+          used: false, createdAt: new Date(),
+        })
+      }
+      // Always return success to avoid user enumeration
+      return json({
+        ok: true,
+        message: "Si un compte existe pour cet email, un lien de r\u00e9initialisation sera envoy\u00e9 (activ\u00e9 apr\u00e8s la migration Supabase)."
+      })
+    }
+
+    if (route === '/auth/delete-account' && method === 'POST') {
+      const user = await requireUser(request, db)
+      if (!user) return err('Non authentifié', 401)
+      const body = await request.json().catch(() => ({}))
+      const full = await db.collection('users').findOne({ id: user.id })
+      const ok = await comparePassword(body.password || '', full.passwordHash)
+      if (!ok) return err('Mot de passe incorrect', 401)
+      // Refuse if user is the sole owner of any workspace
+      const owned = await db.collection('workspace_members').find({ userId: user.id, role: 'owner', status: 'active' }).toArray()
+      for (const m of owned) {
+        const others = await db.collection('workspace_members').countDocuments({ workspaceId: m.workspaceId, role: 'owner', status: 'active', userId: { $ne: user.id } })
+        if (others === 0) {
+          const ws = await db.collection('workspaces').findOne({ id: m.workspaceId })
+          return err(`Vous \u00eates l'unique owner de "${ws?.name || m.workspaceId}". Transf\u00e9rez la propri\u00e9t\u00e9 ou supprimez l'espace avant de supprimer votre compte.`, 400)
+        }
+      }
+      // Remove membership everywhere; keep tasks/messages but anonymize
+      await db.collection('workspace_members').deleteMany({ userId: user.id })
+      await db.collection('groups').updateMany({}, { $pull: { memberIds: user.id } })
+      await db.collection('notifications').deleteMany({ userId: user.id })
+      await db.collection('users').deleteOne({ id: user.id })
+      await audit(db, { workspaceId: null, actorId: user.id, action: 'account_deleted' })
+      return json({ ok: true })
     }
 
     // ============ WORKSPACES ============
@@ -115,12 +197,15 @@ async function handleRoute(request, { params }) {
       const wid = uuidv4()
       const workspace = {
         id: wid,
-        name: body.name,
-        description: body.description || '',
-        icon: body.icon || (body.name[0] || 'W').toUpperCase(),
+        name: body.name.slice(0, 60),
+        description: (body.description || '').slice(0, 300),
+        icon: (body.icon || body.name[0] || 'W').slice(0, 3).toUpperCase(),
+        emoji: body.emoji || null,
+        logo: body.logo || null,
         color: body.color || '#3b82f6',
         ownerId: user.id,
-        inviteCode: makeInviteCode(body.name.split(' ')[0].toUpperCase().slice(0, 6) || 'WT'),
+        archivedAt: null,
+        inviteCode: makeInviteCode(body.name.split(' ')[0] || 'WT'),
         createdAt: new Date(), updatedAt: new Date(),
       }
       await db.collection('workspaces').insertOne(workspace)
@@ -128,6 +213,33 @@ async function handleRoute(request, { params }) {
         id: uuidv4(), workspaceId: wid, userId: user.id,
         role: 'owner', groupId: null, status: 'active', joinedAt: new Date(),
       })
+      // Create default channels (#general, #chefs)
+      await ensureDefaultChannels(db, wid, [])
+      // Optional: create groups on the fly
+      if (Array.isArray(body.groups)) {
+        for (const g of body.groups) {
+          if (!g?.name) continue
+          const groupId = uuidv4()
+          await db.collection('groups').insertOne({
+            id: groupId, workspaceId: wid, name: g.name, description: g.description || '',
+            leaderId: null, memberIds: [], createdAt: new Date(),
+          })
+        }
+      }
+      // Optional: create first task
+      if (body.firstTask?.title) {
+        await db.collection('tasks').insertOne({
+          id: uuidv4(), workspaceId: wid, title: body.firstTask.title,
+          description: body.firstTask.description || '',
+          groupId: null, createdBy: user.id, assignees: [user.id],
+          priority: body.firstTask.priority || 'medium', status: 'todo',
+          startDate: new Date(), dueDate: new Date(Date.now() + 7 * 86400000),
+          proofRequired: false, proofs: [], comments: [],
+          history: [{ userId: user.id, action: 'created', at: new Date() }],
+          createdAt: new Date(), updatedAt: new Date(),
+        })
+      }
+      await audit(db, { workspaceId: wid, actorId: user.id, action: 'workspace_created', meta: { name: workspace.name } })
       return json({ ...strip(workspace), myRole: 'owner', myGroupId: null, memberCount: 1 })
     }
 
@@ -135,10 +247,21 @@ async function handleRoute(request, { params }) {
       const user = await requireUser(request, db)
       if (!user) return err('Non authentifié', 401)
       const body = await request.json()
-      const code = (body.inviteCode || '').trim().toUpperCase()
+      const code = (body.inviteCode || body.token || '').trim().toUpperCase()
       if (!code) return err('Code requis', 400)
-      const workspace = await db.collection('workspaces').findOne({ inviteCode: code })
+      // Try workspace inviteCode first, then a per-invitation token
+      let workspace = await db.collection('workspaces').findOne({ inviteCode: code })
+      let invitation = null
+      if (!workspace) {
+        invitation = await db.collection('invitations').findOne({ token: code, status: 'pending' })
+        if (invitation) {
+          if (invitation.expiresAt && new Date(invitation.expiresAt) < new Date()) return err('Invitation expirée', 400)
+          if (invitation.maxUses && invitation.uses >= invitation.maxUses) return err('Invitation épuisée', 400)
+          workspace = await db.collection('workspaces').findOne({ id: invitation.workspaceId })
+        }
+      }
       if (!workspace) return err('Code invalide', 404)
+      if (workspace.archivedAt) return err('Cet espace est archivé', 400)
       const existing = await db.collection('workspace_members').findOne({ workspaceId: workspace.id, userId: user.id })
       if (existing) {
         if (existing.status !== 'active') {
@@ -146,10 +269,16 @@ async function handleRoute(request, { params }) {
         }
         return json({ workspace: strip(workspace), rejoined: true })
       }
+      const role = invitation?.role || 'member'
+      const groupId = invitation?.groupId || null
       await db.collection('workspace_members').insertOne({
         id: uuidv4(), workspaceId: workspace.id, userId: user.id,
-        role: 'member', groupId: null, status: 'active', joinedAt: new Date(),
+        role, groupId, status: 'active', joinedAt: new Date(),
       })
+      if (invitation) {
+        await db.collection('invitations').updateOne({ id: invitation.id }, { $inc: { uses: 1 } })
+      }
+      await audit(db, { workspaceId: workspace.id, actorId: user.id, action: 'member_joined', meta: { via: invitation ? 'invitation' : 'code' } })
       return json({ workspace: strip(workspace), joined: true })
     }
 
@@ -735,6 +864,148 @@ async function handleRoute(request, { params }) {
       }
       const tasks = await db.collection('tasks').find(query).toArray()
       return json(cleanArr(tasks))
+    }
+
+    // ============ WORKSPACE SETTINGS ============
+    if (route === '/workspace' && method === 'PATCH') {
+      if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
+      const body = await request.json()
+      const update = {}
+      const fields = ['name', 'description', 'icon', 'emoji', 'logo', 'color']
+      for (const f of fields) if (f in body) update[f] = body[f]
+      if (update.name) update.name = String(update.name).slice(0, 60)
+      if (update.description !== undefined) update.description = String(update.description).slice(0, 300)
+      update.updatedAt = new Date()
+      await db.collection('workspaces').updateOne({ id: workspace.id }, { $set: update })
+      await audit(db, { workspaceId: workspace.id, actorId: user.id, action: 'workspace_updated', meta: update })
+      const w = await db.collection('workspaces').findOne({ id: workspace.id })
+      return json(strip(w))
+    }
+
+    if (route === '/workspace/leave' && method === 'POST') {
+      if (member.role === 'owner') {
+        const owners = await db.collection('workspace_members').countDocuments({ workspaceId: workspace.id, role: 'owner', status: 'active' })
+        if (owners <= 1) return err("Vous êtes l'unique owner. Transférez la propriété avant de quitter.", 400)
+      }
+      await db.collection('workspace_members').deleteOne({ id: member.id })
+      await db.collection('groups').updateMany({ workspaceId: workspace.id }, { $pull: { memberIds: user.id } })
+      await audit(db, { workspaceId: workspace.id, actorId: user.id, action: 'member_left' })
+      return json({ ok: true })
+    }
+
+    if (route === '/workspace/transfer-ownership' && method === 'POST') {
+      if (member.role !== 'owner') return err('Seul un owner peut transférer la propriété', 403)
+      const body = await request.json()
+      if (!body.targetUserId) return err('Utilisateur cible requis', 400)
+      const target = await db.collection('workspace_members').findOne({ workspaceId: workspace.id, userId: body.targetUserId, status: 'active' })
+      if (!target) return err('Membre cible introuvable', 404)
+      await db.collection('workspace_members').updateOne({ id: target.id }, { $set: { role: 'owner' } })
+      if (!body.keepCurrentAsOwner) {
+        await db.collection('workspace_members').updateOne({ id: member.id }, { $set: { role: 'admin' } })
+      }
+      await db.collection('workspaces').updateOne({ id: workspace.id }, { $set: { ownerId: body.targetUserId, updatedAt: new Date() } })
+      await audit(db, { workspaceId: workspace.id, actorId: user.id, action: 'ownership_transferred', meta: { to: body.targetUserId } })
+      return json({ ok: true })
+    }
+
+    if (route === '/workspace/archive' && method === 'POST') {
+      if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
+      await db.collection('workspaces').updateOne({ id: workspace.id }, { $set: { archivedAt: new Date(), updatedAt: new Date() } })
+      await audit(db, { workspaceId: workspace.id, actorId: user.id, action: 'workspace_archived' })
+      return json({ ok: true, archived: true })
+    }
+    if (route === '/workspace/unarchive' && method === 'POST') {
+      if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
+      await db.collection('workspaces').updateOne({ id: workspace.id }, { $set: { archivedAt: null, updatedAt: new Date() } })
+      await audit(db, { workspaceId: workspace.id, actorId: user.id, action: 'workspace_unarchived' })
+      return json({ ok: true, archived: false })
+    }
+    if (route === '/workspace' && method === 'DELETE') {
+      if (member.role !== 'owner') return err('Seul le owner peut supprimer un espace', 403)
+      // Cascade delete
+      await db.collection('workspace_members').deleteMany({ workspaceId: workspace.id })
+      await db.collection('groups').deleteMany({ workspaceId: workspace.id })
+      await db.collection('tasks').deleteMany({ workspaceId: workspace.id })
+      await db.collection('channels').deleteMany({ workspaceId: workspace.id })
+      await db.collection('messages').deleteMany({ workspaceId: workspace.id })
+      await db.collection('notifications').deleteMany({ workspaceId: workspace.id })
+      await db.collection('invitations').deleteMany({ workspaceId: workspace.id })
+      await db.collection('workspaces').deleteOne({ id: workspace.id })
+      return json({ ok: true, deleted: true })
+    }
+
+    // ============ INVITATIONS ============
+    if (route === '/workspace/invitations' && method === 'GET') {
+      if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
+      const invs = await db.collection('invitations').find({ workspaceId: workspace.id }).sort({ createdAt: -1 }).toArray()
+      return json(invs.map(strip))
+    }
+    if (route === '/workspace/invitations' && method === 'POST') {
+      if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
+      const body = await request.json()
+      const inv = {
+        id: uuidv4(), workspaceId: workspace.id,
+        email: (body.email || '').toLowerCase().trim() || null,
+        role: ['admin', 'leader', 'member', 'viewer', 'teacher'].includes(body.role) ? body.role : 'member',
+        groupId: body.groupId || null,
+        token: uuidv4().replace(/-/g, '').slice(0, 12).toUpperCase(),
+        expiresAt: body.expiresInDays ? new Date(Date.now() + Number(body.expiresInDays) * 86400000) : new Date(Date.now() + 30 * 86400000),
+        maxUses: body.maxUses || null,
+        uses: 0,
+        status: 'pending',
+        createdBy: user.id,
+        createdAt: new Date(),
+      }
+      await db.collection('invitations').insertOne(inv)
+      await audit(db, { workspaceId: workspace.id, actorId: user.id, action: 'invitation_created', meta: { role: inv.role } })
+      return json(strip(inv))
+    }
+    const invMatch = route.match(/^\/workspace\/invitations\/([^/]+)$/)
+    if (invMatch && method === 'DELETE') {
+      if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
+      await db.collection('invitations').deleteOne({ id: invMatch[1], workspaceId: workspace.id })
+      return json({ ok: true })
+    }
+    if (invMatch && method === 'PATCH') {
+      if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
+      const body = await request.json()
+      const upd = {}
+      if ('status' in body && ['pending', 'revoked'].includes(body.status)) upd.status = body.status
+      if ('expiresAt' in body) upd.expiresAt = body.expiresAt ? new Date(body.expiresAt) : null
+      await db.collection('invitations').updateOne({ id: invMatch[1], workspaceId: workspace.id }, { $set: upd })
+      return json({ ok: true })
+    }
+
+    // ============ AUDIT LOG ============
+    if (route === '/workspace/audit' && method === 'GET') {
+      if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
+      const logs = await db.collection('audit_log').find({ workspaceId: workspace.id }).sort({ createdAt: -1 }).limit(200).toArray()
+      const actorIds = [...new Set(logs.map(l => l.actorId).filter(Boolean))]
+      const actors = await db.collection('users').find({ id: { $in: actorIds } }).toArray()
+      const actorsById = Object.fromEntries(actors.map(u => [u.id, strip(u)]))
+      return json(logs.map(l => ({ ...strip(l), actor: actorsById[l.actorId] || null })))
+    }
+
+    // ============ INTERACTIVE GANTT ============
+    // Dedicated endpoint for drag/resize \u2014 lighter permission surface.
+    const gMatch = route.match(/^\/tasks\/([^/]+)\/dates$/)
+    if (gMatch && method === 'PATCH') {
+      const taskId = gMatch[1]
+      const task = await db.collection('tasks').findOne({ id: taskId, workspaceId: workspace.id })
+      if (!task) return err('Tâche introuvable', 404)
+      const group = await db.collection('groups').findOne({ id: task.groupId, workspaceId: workspace.id })
+      const canManage = canManageGroupTasks({ ...member, userId: user.id }, group)
+      if (!canManage) return err('Non autorisé', 403)
+      const body = await request.json()
+      const update = { updatedAt: new Date() }
+      if (body.startDate) update.startDate = new Date(body.startDate)
+      if (body.dueDate) update.dueDate = new Date(body.dueDate)
+      if (update.startDate && update.dueDate && update.startDate > update.dueDate) {
+        return err('Date de début après date de fin', 400)
+      }
+      await db.collection('tasks').updateOne({ id: taskId }, { $set: update })
+      const updated = await db.collection('tasks').findOne({ id: taskId })
+      return json(strip(updated))
     }
 
     return err(`Route ${route} not found`, 404)

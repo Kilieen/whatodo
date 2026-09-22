@@ -13,7 +13,9 @@ import {
   Bell, LogOut, Moon, Sun, Plus, ChevronLeft, ChevronRight, Menu, X,
   Clock, CheckCircle2, AlertCircle, Paperclip, Send, CheckCheck,
   Upload, FileText, Edit3, Loader2, Shield, Search, BarChart3, Settings,
-  User as UserIcon, ArrowUpRight, GanttChart, MoreHorizontal, Filter, Trash2
+  User as UserIcon, ArrowUpRight, GanttChart, MoreHorizontal, Filter, Trash2,
+  Eye, EyeOff, Camera, Globe, Bell as BellIcon, Lock, LogIn, MoveRight, Copy,
+  Info, Archive, Crown, Activity, Trash, DoorOpen, HelpCircle, Sparkles
 } from 'lucide-react'
 
 import { Input } from '@/components/ui/input'
@@ -130,30 +132,55 @@ function StatusDot({ status, withLabel }) {
 // LOGIN
 // ================================================================
 function LoginScreen({ onLogin }) {
+  const [mode, setMode] = useState('login') // 'login' | 'signup' | 'forgot'
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [password2, setPassword2] = useState('')
+  const [firstName, setFirstName] = useState('')
+  const [lastName, setLastName] = useState('')
+  const [showPwd, setShowPwd] = useState(false)
   const [loading, setLoading] = useState(false)
-  const [users, setUsers] = useState([])
+  const [info, setInfo] = useState(null)
 
-  useEffect(() => {
-    fetch(API + '/auth/users-list').then(r => r.json()).then(setUsers).catch(() => {})
-  }, [])
-
-  async function submit(e) {
+  async function submitLogin(e) {
     e?.preventDefault()
     setLoading(true)
     try {
       const data = await apiFetch('/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ email, password }),
+        method: 'POST', body: JSON.stringify({ email, password }),
       })
       localStorage.setItem('whatodo_token', data.token)
       onLogin(data)
     } catch (e) { toast.error(e.message) } finally { setLoading(false) }
   }
-  function quickPick(u) {
-    setEmail(u.email); setPassword(u.role === 'admin' ? 'admin2026' : 'epco2026')
+
+  async function submitSignup(e) {
+    e?.preventDefault()
+    if (!firstName.trim()) return toast.error('Prénom requis')
+    if (password.length < 8) return toast.error('Mot de passe : min. 8 caractères')
+    if (password !== password2) return toast.error('Les mots de passe ne correspondent pas')
+    setLoading(true)
+    try {
+      const data = await apiFetch('/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({ email, password, firstName, lastName }),
+      })
+      localStorage.setItem('whatodo_token', data.token)
+      toast.success(`Bienvenue ${data.user.firstName}`)
+      onLogin(data)
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
   }
+
+  async function submitForgot(e) {
+    e?.preventDefault()
+    setLoading(true)
+    try {
+      const r = await apiFetch('/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) })
+      setInfo(r.message)
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+  }
+
+  const input = "w-full h-11 px-4 rounded-xl bg-[color:var(--w-surface)] border border-[color:var(--w-border)] text-white placeholder:text-3 focus:outline-none focus:border-white/25 transition"
 
   return (
     <div className="min-h-screen flex items-center justify-center p-6">
@@ -164,39 +191,61 @@ function LoginScreen({ onLogin }) {
           <p className="text-sm text-2 mt-2">Organisez. Collaborez. Avancez.</p>
         </div>
 
-        <form onSubmit={submit} className="space-y-3">
-          <div>
-            <input id="email" type="email" placeholder="Email" value={email}
-              onChange={e => setEmail(e.target.value)} required autoComplete="email"
-              className="w-full h-11 px-4 rounded-xl bg-[color:var(--w-surface)] border border-[color:var(--w-border)] text-white placeholder:text-3 focus:outline-none focus:border-white/25 transition" />
-          </div>
-          <div>
-            <input id="password" type="password" placeholder="Mot de passe" value={password}
-              onChange={e => setPassword(e.target.value)} required autoComplete="current-password"
-              className="w-full h-11 px-4 rounded-xl bg-[color:var(--w-surface)] border border-[color:var(--w-border)] text-white placeholder:text-3 focus:outline-none focus:border-white/25 transition" />
-          </div>
-          <button type="submit" disabled={loading}
-            className="w-full h-11 rounded-xl btn-primary text-sm">
-            {loading ? <Loader2 className="w-4 h-4 mx-auto animate-spin" /> : 'Se connecter'}
-          </button>
-        </form>
-
-        {users.length > 0 && (
-          <div className="mt-10 anim-fade" style={{ animationDelay: '0.15s' }}>
-            <p className="t-meta text-center mb-3">
-              Accès démo · <span className="font-mono">epco2026</span> · admin <span className="font-mono">admin2026</span>
-            </p>
-            <div className="flex flex-wrap justify-center gap-1.5">
-              {users.map(u => (
-                <button key={u.email} onClick={() => quickPick(u)}
-                  className={`text-[11px] px-2.5 py-1 rounded-full border transition ${
-                    u.role === 'admin' ? 'bg-white text-[#0a1428] border-white' :
-                    u.role === 'leader' ? 'border-white/25 text-white' :
-                    'border-white/10 text-white/50 hover:text-white hover:border-white/20'
-                  }`}>{u.firstName}</button>
-              ))}
+        {mode === 'login' && (
+          <form onSubmit={submitLogin} className="space-y-3">
+            <input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} required autoComplete="email" className={input} />
+            <div className="relative">
+              <input type={showPwd ? 'text' : 'password'} placeholder="Mot de passe" value={password} onChange={e => setPassword(e.target.value)} required autoComplete="current-password" className={input + ' pr-11'} />
+              <button type="button" onClick={() => setShowPwd(v => !v)} className="absolute right-3 top-1/2 -translate-y-1/2 text-3 hover:text-white transition" tabIndex={-1}>
+                {showPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
             </div>
-          </div>
+            <button type="submit" disabled={loading} className="w-full h-11 rounded-xl btn-primary text-sm">
+              {loading ? <Loader2 className="w-4 h-4 mx-auto animate-spin" /> : 'Se connecter'}
+            </button>
+            <div className="flex items-center justify-between pt-2">
+              <button type="button" onClick={() => { setMode('forgot'); setInfo(null) }} className="text-[12px] text-3 hover:text-white transition">Mot de passe oublié ?</button>
+              <button type="button" onClick={() => setMode('signup')} className="text-[12px] text-white/80 hover:text-white transition">Créer un compte →</button>
+            </div>
+          </form>
+        )}
+
+        {mode === 'signup' && (
+          <form onSubmit={submitSignup} className="space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <input placeholder="Prénom" value={firstName} onChange={e => setFirstName(e.target.value)} required autoComplete="given-name" className={input} />
+              <input placeholder="Nom (optionnel)" value={lastName} onChange={e => setLastName(e.target.value)} autoComplete="family-name" className={input} />
+            </div>
+            <input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} required autoComplete="email" className={input} />
+            <div className="relative">
+              <input type={showPwd ? 'text' : 'password'} placeholder="Mot de passe (8 caractères min.)" value={password} onChange={e => setPassword(e.target.value)} required autoComplete="new-password" className={input + ' pr-11'} />
+              <button type="button" onClick={() => setShowPwd(v => !v)} className="absolute right-3 top-1/2 -translate-y-1/2 text-3 hover:text-white transition" tabIndex={-1}>
+                {showPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+            <input type={showPwd ? 'text' : 'password'} placeholder="Confirmer le mot de passe" value={password2} onChange={e => setPassword2(e.target.value)} required autoComplete="new-password" className={input} />
+            {password && password2 && password !== password2 && <p className="text-[11px] text-red-400">Les mots de passe ne correspondent pas</p>}
+            <button type="submit" disabled={loading} className="w-full h-11 rounded-xl btn-primary text-sm">
+              {loading ? <Loader2 className="w-4 h-4 mx-auto animate-spin" /> : 'Créer mon compte'}
+            </button>
+            <div className="text-center pt-2">
+              <button type="button" onClick={() => setMode('login')} className="text-[12px] text-3 hover:text-white transition">← Déjà un compte ? Se connecter</button>
+            </div>
+          </form>
+        )}
+
+        {mode === 'forgot' && (
+          <form onSubmit={submitForgot} className="space-y-3">
+            <p className="text-[13px] text-2 leading-relaxed">Entrez l'email de votre compte. Nous vous enverrons un lien pour réinitialiser votre mot de passe.</p>
+            <input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} required autoComplete="email" className={input} />
+            <button type="submit" disabled={loading} className="w-full h-11 rounded-xl btn-primary text-sm">
+              {loading ? <Loader2 className="w-4 h-4 mx-auto animate-spin" /> : 'Envoyer le lien'}
+            </button>
+            {info && <p className="text-[12px] text-white/80 bg-white/[0.05] border border-white/10 rounded-xl p-3 leading-relaxed">{info}</p>}
+            <div className="text-center pt-1">
+              <button type="button" onClick={() => setMode('login')} className="text-[12px] text-3 hover:text-white transition">← Retour</button>
+            </div>
+          </form>
         )}
       </div>
     </div>
@@ -1328,12 +1377,85 @@ function CreateTaskDialog({ open, onClose, me, groups, onCreated }) {
 }
 
 // ================================================================
-// GANTT VIEW
+// GANTT VIEW — interactive (drag + resize)
 // ================================================================
+function GanttBar({ t, x, w, rowHeight, dayWidth, canManage, done, status, onCommit, onOpen }) {
+  const [drag, setDrag] = useState(null) // { mode: 'move'|'resize-l'|'resize-r', startX, x0, w0 }
+  const [preview, setPreview] = useState({ x, w })
+  useEffect(() => { setPreview({ x, w }) }, [x, w])
+
+  function onDown(mode) {
+    return (e) => {
+      if (!canManage) return
+      e.preventDefault(); e.stopPropagation()
+      const startX = e.clientX ?? e.touches?.[0]?.clientX
+      setDrag({ mode, startX, x0: x, w0: w })
+    }
+  }
+  useEffect(() => {
+    if (!drag) return
+    function move(e) {
+      const cx = e.clientX ?? e.touches?.[0]?.clientX
+      const dx = cx - drag.startX
+      if (drag.mode === 'move') setPreview({ x: drag.x0 + dx, w: drag.w0 })
+      else if (drag.mode === 'resize-l') setPreview({ x: drag.x0 + dx, w: Math.max(dayWidth, drag.w0 - dx) })
+      else if (drag.mode === 'resize-r') setPreview({ x: drag.x0, w: Math.max(dayWidth, drag.w0 + dx) })
+    }
+    function up() {
+      // Snap to day
+      const snap = (v) => Math.round(v / dayWidth) * dayWidth
+      const nx = snap(preview.x)
+      const nw = Math.max(dayWidth, snap(preview.w))
+      setPreview({ x: nx, w: nw })
+      onCommit({ x: nx, w: nw, mode: drag.mode })
+      setDrag(null)
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+    window.addEventListener('touchmove', move, { passive: false })
+    window.addEventListener('touchend', up)
+    return () => {
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+      window.removeEventListener('touchmove', move)
+      window.removeEventListener('touchend', up)
+    }
+  }, [drag, preview, dayWidth, onCommit])
+
+  return (
+    <div
+      onMouseDown={onDown('move')}
+      onTouchStart={onDown('move')}
+      onClick={(e) => { if (!drag) onOpen() }}
+      className={`absolute top-2 rounded-md border transition-shadow overflow-hidden group ${canManage ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} ${drag ? 'shadow-2xl ring-1 ring-white/40 z-10' : ''}`}
+      style={{
+        left: preview.x, width: preview.w, height: rowHeight - 16,
+        background: done ? 'rgba(52,211,153,0.22)' : 'rgba(96,165,250,0.2)',
+        borderColor: done ? 'rgba(52,211,153,0.5)' : 'rgba(96,165,250,0.45)',
+        userSelect: 'none',
+      }}
+      title={t.title}>
+      {canManage && (
+        <div onMouseDown={onDown('resize-l')} onTouchStart={onDown('resize-l')}
+          className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-white/40 transition" />
+      )}
+      <div className="h-full flex items-center px-2 gap-1.5 text-[11px] text-white/95 whitespace-nowrap pointer-events-none">
+        <span className={`dot ${STATUS[status].dot} shrink-0`} />
+        <span className="truncate font-medium">{t.title}</span>
+      </div>
+      {canManage && (
+        <div onMouseDown={onDown('resize-r')} onTouchStart={onDown('resize-r')}
+          className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-white/40 transition" />
+      )}
+    </div>
+  )
+}
+
 function GanttView({ me, users, groups, onOpenTask, refreshKey }) {
   const [tasks, setTasks] = useState([])
   const [loading, setLoading] = useState(true)
   const [zoom, setZoom] = useState('week') // day | week | month
+  const [tick, setTick] = useState(0)
 
   async function load() {
     setLoading(true)
@@ -1355,7 +1477,7 @@ function GanttView({ me, users, groups, onOpenTask, refreshKey }) {
     min.setHours(0,0,0,0); max.setHours(23,59,59,999)
     const days = Math.ceil((max - min) / 86400000)
     return { minD: min, maxD: max, dayWidth: zoom === 'day' ? 50 : zoom === 'week' ? 20 : 8, totalDays: days }
-  }, [tasks, zoom])
+  }, [tasks, zoom, tick])
 
   const rowHeight = 44
   const totalWidth = totalDays * dayWidth
@@ -1364,6 +1486,30 @@ function GanttView({ me, users, groups, onOpenTask, refreshKey }) {
 
   function daysToX(date) { return ((new Date(date) - minD) / 86400000) * dayWidth }
   function daysToWidth(start, end) { return Math.max(dayWidth, ((new Date(end) - new Date(start)) / 86400000) * dayWidth) }
+
+  function canManageTask(t) {
+    if (['owner','admin'].includes(me.role)) return true
+    const g = groups.find(gr => gr.id === t.groupId)
+    if (me.role === 'leader' && g?.leaderId === me.id) return true
+    return false
+  }
+
+  async function commitBar(t, { x, w, mode }) {
+    const newStart = new Date(minD.getTime() + (x / dayWidth) * 86400000)
+    const newEnd = new Date(minD.getTime() + ((x + w) / dayWidth) * 86400000)
+    const payload = {}
+    if (mode === 'move') { payload.startDate = newStart; payload.dueDate = newEnd }
+    else if (mode === 'resize-l') payload.startDate = newStart
+    else if (mode === 'resize-r') payload.dueDate = newEnd
+    // Optimistic update
+    setTasks(prev => prev.map(x => x.id === t.id ? { ...x, ...payload } : x))
+    try {
+      await apiFetch(`/tasks/${t.id}/dates`, { method: 'PATCH', body: JSON.stringify(payload) })
+    } catch (e) {
+      toast.error(e.message)
+      load()
+    }
+  }
 
   // Header ticks
   const ticks = []
@@ -1381,7 +1527,7 @@ function GanttView({ me, users, groups, onOpenTask, refreshKey }) {
         <div>
           <p className="text-sm text-2 mb-1">Chronologie</p>
           <h1 className="t-h1">Gantt</h1>
-          <p className="text-sm text-2 mt-2">{tasks.length} tâche(s) affichée(s)</p>
+          <p className="text-sm text-2 mt-2">{tasks.length} tâche(s) affichée(s) · glissez les barres pour ajuster les dates</p>
         </div>
         <div className="flex items-center gap-2">
           <div className="pill-group">
@@ -1399,7 +1545,8 @@ function GanttView({ me, users, groups, onOpenTask, refreshKey }) {
       ) : tasks.length === 0 ? (
         <div className="surface p-12 text-center">
           <GanttChart className="w-8 h-8 mx-auto text-white/25 mb-2" />
-          <p className="text-sm text-2">Aucune tâche avec dates. Ajoute des dates pour voir la chronologie.</p>
+          <p className="text-sm text-2">Aucune tâche avec dates.</p>
+          <p className="text-[12px] text-3 mt-1">Créez une tâche avec une date de début et une échéance pour la voir apparaître.</p>
         </div>
       ) : (
         <div className="surface p-0 overflow-hidden">
@@ -1424,32 +1571,24 @@ function GanttView({ me, users, groups, onOpenTask, refreshKey }) {
               </div>
               {/* Rows */}
               <div className="relative">
-                {tasks.map((t, idx) => {
+                {tasks.map((t) => {
                   const x = daysToX(t.startDate)
                   const w = daysToWidth(t.startDate, t.dueDate)
                   const g = groups.find(gr => gr.id === t.groupId)
                   const done = t.status === 'done'
+                  const canManage = canManageTask({ ...t })
                   return (
                     <div key={t.id} className="flex border-b border-[color:var(--w-border)]/50 hover:bg-white/[0.02] transition"
                       style={{ height: rowHeight }}>
                       <div className="w-[240px] shrink-0 px-4 flex flex-col justify-center border-r border-[color:var(--w-border)]">
                         <p className="text-[12.5px] font-medium truncate">{t.title}</p>
-                        <p className="text-[10px] text-3 truncate">{g?.name}</p>
+                        <p className="text-[10px] text-3 truncate">{g?.name || '—'}</p>
                       </div>
                       <div className="relative flex-1" style={{ height: rowHeight }}>
-                        <button onClick={() => onOpenTask(t)}
-                          className="absolute top-2 rounded-md border transition-all hover:scale-y-110 origin-left cursor-pointer overflow-hidden group"
-                          style={{
-                            left: x, width: w, height: rowHeight - 16,
-                            background: done ? 'rgba(52,211,153,0.18)' : 'rgba(96,165,250,0.16)',
-                            borderColor: done ? 'rgba(52,211,153,0.4)' : 'rgba(96,165,250,0.35)',
-                          }}
-                          title={t.title}>
-                          <div className="h-full flex items-center px-2 gap-1.5 text-[11px] text-white/95 whitespace-nowrap">
-                            <span className={`dot ${STATUS[t.status].dot} shrink-0`} />
-                            <span className="truncate font-medium">{t.title}</span>
-                          </div>
-                        </button>
+                        <GanttBar t={t} x={x} w={w} rowHeight={rowHeight} dayWidth={dayWidth}
+                          canManage={canManage} done={done} status={t.status}
+                          onCommit={(payload) => commitBar(t, payload)}
+                          onOpen={() => onOpenTask(t)} />
                         <div style={{ left: todayOffset, position: 'absolute', top: 0, height: '100%' }}
                           className="w-px bg-white/25 pointer-events-none" />
                       </div>
@@ -2273,20 +2412,35 @@ function WelcomeSplash({ name, onDone }) {
 // ONBOARDING (no workspace yet)
 // ================================================================
 function OnboardingScreen({ user, onCreated, onJoined, onLogout }) {
-  const [mode, setMode] = useState('choose') // choose | create | join
+  const [mode, setMode] = useState('choose') // choose | create | join | joined-preview
+  const [loading, setLoading] = useState(false)
+  // Create wizard state
+  const [step, setStep] = useState(0)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
+  const [emoji, setEmoji] = useState('🚀')
   const [color, setColor] = useState('#3b82f6')
+  const [groupsDraft, setGroupsDraft] = useState([])
+  const [newGroupName, setNewGroupName] = useState('')
+  const [firstTaskTitle, setFirstTaskTitle] = useState('')
+  // Join state
   const [inviteCode, setInviteCode] = useState('')
-  const [loading, setLoading] = useState(false)
+  const [preview, setPreview] = useState(null)
 
   const colors = ['#3b82f6', '#8b5cf6', '#ec4899', '#f97316', '#10b981', '#14b8a6', '#eab308', '#ef4444']
+  const emojis = ['🚀', '🎯', '📚', '💼', '🎨', '⚡', '🌟', '🔥', '🌱', '🏆', '💡', '🎪']
 
   async function createWorkspace() {
     if (!name.trim()) return toast.error('Nom requis')
     setLoading(true)
     try {
-      const ws = await apiFetch('/workspaces', { method: 'POST', body: JSON.stringify({ name, description, color }) })
+      const payload = {
+        name, description, color, emoji,
+        icon: (name[0] || 'W').toUpperCase(),
+        groups: groupsDraft.map(g => ({ name: g })),
+      }
+      if (firstTaskTitle.trim()) payload.firstTask = { title: firstTaskTitle.trim() }
+      const ws = await apiFetch('/workspaces', { method: 'POST', body: JSON.stringify(payload) })
       toast.success('Espace créé')
       onCreated(ws)
     } catch (e) { toast.error(e.message) } finally { setLoading(false) }
@@ -2296,25 +2450,46 @@ function OnboardingScreen({ user, onCreated, onJoined, onLogout }) {
     setLoading(true)
     try {
       const { workspace } = await apiFetch('/workspaces/join', { method: 'POST', body: JSON.stringify({ inviteCode }) })
-      toast.success(`Bienvenue dans ${workspace.name}`)
-      onJoined(workspace)
+      setPreview(workspace)
+      setMode('joined-preview')
     } catch (e) { toast.error(e.message) } finally { setLoading(false) }
   }
+  function addGroup() {
+    const v = newGroupName.trim()
+    if (!v) return
+    if (groupsDraft.length >= 10) return toast.error('Max 10 groupes')
+    setGroupsDraft(prev => [...prev, v])
+    setNewGroupName('')
+  }
+  function removeGroup(i) { setGroupsDraft(prev => prev.filter((_, k) => k !== i)) }
+
+  const input = "w-full h-11 px-3 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)] text-white text-sm focus:outline-none focus:border-white/25"
+
+  // Wizard steps
+  const steps = [
+    { key: 'name', title: 'Nommez votre espace', sub: 'Vous pourrez le modifier plus tard.' },
+    { key: 'appearance', title: 'Une identité visuelle', sub: 'Choisissez un emoji et une couleur.' },
+    { key: 'groups', title: 'Créez des groupes (optionnel)', sub: 'Organisez votre équipe par sous-groupes.' },
+    { key: 'firstTask', title: 'Votre première tâche (optionnel)', sub: 'Un petit pas pour démarrer.' },
+    { key: 'ready', title: "C'est prêt", sub: 'Créons votre espace.' },
+  ]
+  const s = steps[step]
+  const canNext = step === 0 ? name.trim().length > 0 : true
 
   return (
     <div className="min-h-screen flex items-center justify-center p-6">
-      <div className="w-full max-w-md anim-fade-up">
-        <div className="flex flex-col items-center mb-10">
-          <WhatodoLogo size={56} stroke="#ffffff" className="mb-5 opacity-95" />
+      <div className="w-full max-w-lg anim-fade-up">
+        <div className="flex flex-col items-center mb-8">
+          <WhatodoLogo size={52} stroke="#ffffff" className="mb-5 opacity-95" />
           <h1 className="text-3xl font-bold tracking-tight">Bienvenue {user.firstName}</h1>
           <p className="text-sm text-2 mt-2 text-center">Organisez vos projets. Travaillez en équipe. Avancez simplement.</p>
         </div>
 
         {mode === 'choose' && (
-          <div className="space-y-2">
-            <button onClick={() => setMode('create')}
+          <div className="space-y-2 anim-scale">
+            <button onClick={() => { setMode('create'); setStep(0) }}
               className="surface surface-interactive w-full p-5 text-left flex items-center gap-4">
-              <div className="w-10 h-10 rounded-xl bg-white/[0.05] flex items-center justify-center">
+              <div className="w-11 h-11 rounded-xl bg-white/[0.06] flex items-center justify-center">
                 <Plus className="w-5 h-5" />
               </div>
               <div className="flex-1">
@@ -2325,12 +2500,12 @@ function OnboardingScreen({ user, onCreated, onJoined, onLogout }) {
             </button>
             <button onClick={() => setMode('join')}
               className="surface surface-interactive w-full p-5 text-left flex items-center gap-4">
-              <div className="w-10 h-10 rounded-xl bg-white/[0.05] flex items-center justify-center">
+              <div className="w-11 h-11 rounded-xl bg-white/[0.06] flex items-center justify-center">
                 <Users className="w-5 h-5" />
               </div>
               <div className="flex-1">
                 <p className="font-semibold">Rejoindre un espace</p>
-                <p className="text-[12.5px] text-2 mt-0.5">Utilisez un code d'invitation reçu</p>
+                <p className="text-[12.5px] text-2 mt-0.5">Avec un code d'invitation reçu</p>
               </div>
               <ArrowUpRight className="w-4 h-4 text-3" />
             </button>
@@ -2341,43 +2516,147 @@ function OnboardingScreen({ user, onCreated, onJoined, onLogout }) {
         )}
 
         {mode === 'create' && (
-          <div className="surface p-5 space-y-3 anim-scale">
-            <div>
-              <label className="text-[11px] text-3 mb-1.5 block">Nom de l'espace</label>
-              <input value={name} onChange={e => setName(e.target.value)} placeholder="Ex: Voyage d'étude 2026"
-                className="w-full h-11 px-3 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)] text-white text-sm focus:outline-none focus:border-white/25" />
+          <div className="surface p-6 space-y-5 anim-scale">
+            <div className="flex items-center gap-2">
+              {steps.map((_, i) => (
+                <div key={i} className={`h-1 flex-1 rounded-full transition ${i <= step ? 'bg-white' : 'bg-white/10'}`} />
+              ))}
             </div>
             <div>
-              <label className="text-[11px] text-3 mb-1.5 block">Description (optionnelle)</label>
-              <input value={description} onChange={e => setDescription(e.target.value)} placeholder="Ex: Organisation du voyage à Berlin"
-                className="w-full h-10 px-3 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)] text-white text-sm focus:outline-none focus:border-white/25" />
+              <p className="text-[11px] uppercase tracking-widest text-3">Étape {step + 1} / {steps.length}</p>
+              <h2 className="text-xl font-semibold mt-1">{s.title}</h2>
+              <p className="text-[13px] text-2 mt-1">{s.sub}</p>
             </div>
-            <div>
-              <label className="text-[11px] text-3 mb-1.5 block">Couleur</label>
-              <div className="flex gap-2">
-                {colors.map(c => (
-                  <button key={c} onClick={() => setColor(c)}
-                    className={`w-8 h-8 rounded-full transition ${color === c ? 'ring-2 ring-white ring-offset-2 ring-offset-[color:var(--w-surface)] scale-110' : 'opacity-70 hover:opacity-100'}`}
-                    style={{ background: c }} />
-                ))}
+
+            {s.key === 'name' && (
+              <div className="space-y-3">
+                <div>
+                  <label className="text-[11px] text-3 mb-1.5 block">Nom de l'espace *</label>
+                  <input autoFocus value={name} onChange={e => setName(e.target.value.slice(0, 60))} placeholder="Ex: Projet Alpha, EPCO 2026, Voyage Berlin"
+                    className={input} />
+                </div>
+                <div>
+                  <label className="text-[11px] text-3 mb-1.5 block">Description (optionnelle)</label>
+                  <textarea value={description} onChange={e => setDescription(e.target.value.slice(0, 300))} placeholder="Ex: Organisation du speed dating entreprises"
+                    rows={3}
+                    className={"w-full px-3 py-2.5 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)] text-white text-sm focus:outline-none focus:border-white/25 resize-none"} />
+                </div>
               </div>
-            </div>
+            )}
+
+            {s.key === 'appearance' && (
+              <div className="space-y-4">
+                <div>
+                  <label className="text-[11px] text-3 mb-2 block">Emoji</label>
+                  <div className="grid grid-cols-6 gap-2">
+                    {emojis.map(e => (
+                      <button key={e} onClick={() => setEmoji(e)}
+                        className={`h-11 rounded-xl text-xl transition ${emoji === e ? 'bg-white/[0.08] ring-1 ring-white/30 scale-110' : 'bg-white/[0.03] hover:bg-white/[0.06]'}`}>{e}</button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[11px] text-3 mb-2 block">Couleur</label>
+                  <div className="flex flex-wrap gap-2">
+                    {colors.map(c => (
+                      <button key={c} onClick={() => setColor(c)}
+                        className={`w-9 h-9 rounded-full transition ${color === c ? 'ring-2 ring-white ring-offset-2 ring-offset-[color:var(--w-surface)] scale-110' : 'opacity-70 hover:opacity-100'}`}
+                        style={{ background: c }} />
+                    ))}
+                  </div>
+                </div>
+                <div className="mt-4 p-4 rounded-xl bg-white/[0.03] border border-white/10 flex items-center gap-3">
+                  <div className="w-11 h-11 rounded-xl flex items-center justify-center text-xl font-bold text-white" style={{ background: color }}>{emoji}</div>
+                  <div>
+                    <p className="text-sm font-semibold">{name || 'Votre espace'}</p>
+                    <p className="text-[11.5px] text-3">Aperçu</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {s.key === 'groups' && (
+              <div className="space-y-3">
+                <div className="flex gap-2">
+                  <input value={newGroupName} onChange={e => setNewGroupName(e.target.value)} onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addGroup())}
+                    placeholder="Nom du groupe (ex: Communication)" className={input} />
+                  <button onClick={addGroup} className="h-11 px-4 rounded-xl btn-ghost text-sm inline-flex items-center gap-1">
+                    <Plus className="w-4 h-4" /> Ajouter
+                  </button>
+                </div>
+                {groupsDraft.length > 0 && (
+                  <div className="space-y-1.5">
+                    {groupsDraft.map((g, i) => (
+                      <div key={i} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white/[0.03] border border-white/10">
+                        <div className="w-6 h-6 rounded-md bg-white/10 flex items-center justify-center text-[11px] font-semibold">{i + 1}</div>
+                        <p className="flex-1 text-sm">{g}</p>
+                        <button onClick={() => removeGroup(i)} className="text-3 hover:text-red-400 transition"><X className="w-4 h-4" /></button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {groupsDraft.length === 0 && <p className="text-[12px] text-3 italic">Aucun groupe pour l'instant. Vous pourrez en créer plus tard.</p>}
+              </div>
+            )}
+
+            {s.key === 'firstTask' && (
+              <div className="space-y-3">
+                <div>
+                  <label className="text-[11px] text-3 mb-1.5 block">Titre de la première tâche</label>
+                  <input value={firstTaskTitle} onChange={e => setFirstTaskTitle(e.target.value)} placeholder="Ex: Préparer la réunion de kick-off" className={input} />
+                </div>
+                <p className="text-[12px] text-3 italic">Vous pouvez sauter cette étape.</p>
+              </div>
+            )}
+
+            {s.key === 'ready' && (
+              <div className="space-y-3">
+                <div className="p-4 rounded-xl bg-white/[0.03] border border-white/10 flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl" style={{ background: color }}>{emoji}</div>
+                  <div className="flex-1">
+                    <p className="font-semibold">{name}</p>
+                    {description && <p className="text-[12px] text-2 mt-0.5">{description}</p>}
+                    <p className="text-[11px] text-3 mt-1">
+                      {groupsDraft.length ? `${groupsDraft.length} groupe${groupsDraft.length > 1 ? 's' : ''}` : 'Aucun groupe'}
+                      {firstTaskTitle && ' · 1 tâche'}
+                    </p>
+                  </div>
+                </div>
+                <p className="text-[12px] text-2">Vous deviendrez <span className="text-white font-medium">Owner</span> de cet espace.</p>
+              </div>
+            )}
+
             <div className="flex gap-2 pt-2">
-              <button onClick={() => setMode('choose')} className="h-10 px-4 rounded-xl btn-ghost text-sm flex-1">Retour</button>
-              <button onClick={createWorkspace} disabled={loading}
-                className="h-10 px-4 rounded-xl btn-primary text-sm flex-1 inline-flex items-center justify-center gap-1">
-                {loading && <Loader2 className="w-4 h-4 animate-spin" />} Créer l'espace
+              <button onClick={() => { if (step === 0) setMode('choose'); else setStep(step - 1) }}
+                className="h-10 px-4 rounded-xl btn-ghost text-sm inline-flex items-center gap-1">
+                <ChevronLeft className="w-4 h-4" /> {step === 0 ? 'Retour' : 'Précédent'}
               </button>
+              <div className="flex-1" />
+              {step < steps.length - 1 ? (
+                <button onClick={() => setStep(step + 1)} disabled={!canNext}
+                  className="h-10 px-5 rounded-xl btn-primary text-sm inline-flex items-center gap-1 disabled:opacity-40">
+                  Suivant <ChevronRight className="w-4 h-4" />
+                </button>
+              ) : (
+                <button onClick={createWorkspace} disabled={loading}
+                  className="h-10 px-5 rounded-xl btn-primary text-sm inline-flex items-center gap-2">
+                  {loading && <Loader2 className="w-4 h-4 animate-spin" />} Créer l'espace
+                </button>
+              )}
             </div>
           </div>
         )}
 
         {mode === 'join' && (
-          <div className="surface p-5 space-y-3 anim-scale">
+          <div className="surface p-6 space-y-4 anim-scale">
+            <div>
+              <h2 className="text-xl font-semibold">Rejoindre un espace</h2>
+              <p className="text-[13px] text-2 mt-1">Entrez le code d'invitation que vous avez reçu.</p>
+            </div>
             <div>
               <label className="text-[11px] text-3 mb-1.5 block">Code d'invitation</label>
-              <input value={inviteCode} onChange={e => setInviteCode(e.target.value.toUpperCase())} placeholder="EPCO-XXXXX"
-                className="w-full h-11 px-3 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)] text-white text-sm font-mono uppercase focus:outline-none focus:border-white/25" />
+              <input value={inviteCode} onChange={e => setInviteCode(e.target.value.toUpperCase())} placeholder="XXXXXX-XXXXX"
+                className={input + ' font-mono uppercase tracking-wider'} />
               <p className="text-[11px] text-3 mt-1.5">Demandez le code à un membre de l'espace.</p>
             </div>
             <div className="flex gap-2 pt-2">
@@ -2387,6 +2666,22 @@ function OnboardingScreen({ user, onCreated, onJoined, onLogout }) {
                 {loading && <Loader2 className="w-4 h-4 animate-spin" />} Rejoindre
               </button>
             </div>
+          </div>
+        )}
+
+        {mode === 'joined-preview' && preview && (
+          <div className="surface p-6 space-y-4 anim-scale text-center">
+            <div className="w-16 h-16 rounded-2xl mx-auto flex items-center justify-center text-3xl" style={{ background: preview.color || '#3b82f6' }}>
+              {preview.emoji || preview.icon || preview.name[0]}
+            </div>
+            <div>
+              <p className="text-[12px] uppercase tracking-widest text-3">Bienvenue dans</p>
+              <h2 className="text-2xl font-bold mt-1">{preview.name}</h2>
+              {preview.description && <p className="text-[13px] text-2 mt-2">{preview.description}</p>}
+            </div>
+            <button onClick={() => onJoined(preview)} className="w-full h-11 rounded-xl btn-primary text-sm">
+              Entrer dans l'espace
+            </button>
           </div>
         )}
       </div>
@@ -2502,6 +2797,518 @@ function InvitePanel({ workspace, canManage, onClose, onRegenerated }) {
 
 
 // ================================================================
+// TUTORIAL TOUR — 5-step interactive walkthrough
+// ================================================================
+const TOUR_STEPS = [
+  { icon: LayoutDashboard, title: 'Bienvenue sur Whatodo', body: "Voici votre nouvel espace. Votre dashboard vous donne une vue d'ensemble à chaque connexion." },
+  { icon: ListChecks, title: 'Gérez vos tâches', body: "Créez, assignez, priorisez. Le Kanban et le calendrier vous aident à suivre l'avancement." },
+  { icon: Users, title: 'Invitez votre équipe', body: "Générez un code d'invitation ou envoyez un lien depuis l'onglet Membres." },
+  { icon: CalIcon, title: 'Planifiez sur le calendrier', body: "Vue mois, semaine ou jour. Cliquez sur une date pour voir ce qui doit être fait." },
+  { icon: GanttChart, title: 'Anticipez avec le Gantt', body: "Visualisez toutes vos tâches sur une timeline. Glissez pour ajuster les dates." },
+  { icon: MessageSquare, title: 'Discutez en équipe', body: "Un channel #general, un channel #chefs, et un par groupe. Mentionnez avec @nom." },
+  { icon: Sparkles, title: 'À vous de jouer', body: "Vous êtes prêt. Créez votre première tâche, invitez vos coéquipiers, avancez." },
+]
+function TutorialTour({ onFinish }) {
+  const [i, setI] = useState(0)
+  const s = TOUR_STEPS[i]
+  const last = i === TOUR_STEPS.length - 1
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm anim-fade">
+      <div className="w-full max-w-md surface p-6 space-y-4 anim-scale">
+        <div className="flex items-center gap-1.5">
+          {TOUR_STEPS.map((_, k) => (
+            <div key={k} className={`h-1 flex-1 rounded-full transition ${k <= i ? 'bg-white' : 'bg-white/10'}`} />
+          ))}
+        </div>
+        <div className="flex items-center gap-3 pt-1">
+          <div className="w-12 h-12 rounded-xl bg-white/[0.06] flex items-center justify-center">
+            <s.icon className="w-5 h-5" />
+          </div>
+          <div>
+            <p className="text-[11px] uppercase tracking-widest text-3">Étape {i + 1} / {TOUR_STEPS.length}</p>
+            <h3 className="text-lg font-semibold">{s.title}</h3>
+          </div>
+        </div>
+        <p className="text-[14px] text-2 leading-relaxed">{s.body}</p>
+        <div className="flex gap-2 pt-1">
+          <button onClick={() => onFinish(false)} className="h-9 px-3 rounded-lg text-[13px] text-3 hover:text-white transition">Passer</button>
+          <div className="flex-1" />
+          {i > 0 && (
+            <button onClick={() => setI(i - 1)} className="h-9 px-3 rounded-lg btn-ghost text-[13px] inline-flex items-center gap-1">
+              <ChevronLeft className="w-4 h-4" /> Précédent
+            </button>
+          )}
+          <button onClick={() => last ? onFinish(true) : setI(i + 1)} className="h-9 px-4 rounded-lg btn-primary text-[13px] inline-flex items-center gap-1">
+            {last ? 'Commencer' : 'Suivant'} {!last && <ChevronRight className="w-4 h-4" />}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ================================================================
+// PROFILE VIEW — user account & preferences
+// ================================================================
+function ProfileView({ me, onUpdated, onLogout, onReplayTutorial }) {
+  const [firstName, setFirstName] = useState(me.firstName || '')
+  const [lastName, setLastName] = useState(me.lastName || '')
+  const [email, setEmail] = useState(me.email || '')
+  const [bio, setBio] = useState(me.bio || '')
+  const [avatar, setAvatar] = useState(me.avatar || null)
+  const [timezone, setTimezone] = useState(me.timezone || 'Europe/Zurich')
+  const [locale, setLocale] = useState(me.locale || 'fr')
+  const [notifPrefs, setNotifPrefs] = useState(me.notifPrefs || { taskAssigned: true, taskValidated: true, mentions: true, comments: true, deadlines: true })
+  const [saving, setSaving] = useState(false)
+  const [pwd, setPwd] = useState({ current: '', next: '', confirm: '' })
+  const [pwdLoading, setPwdLoading] = useState(false)
+  const [showDelete, setShowDelete] = useState(false)
+  const [delPwd, setDelPwd] = useState('')
+
+  async function handleAvatarFile(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (file.size > 500 * 1024) return toast.error('Image trop lourde (max 500 Ko)')
+    const reader = new FileReader()
+    reader.onload = () => setAvatar(reader.result)
+    reader.readAsDataURL(file)
+  }
+
+  async function save() {
+    setSaving(true)
+    try {
+      const r = await apiFetch('/auth/me', { method: 'PATCH', body: JSON.stringify({ firstName, lastName, email, bio, avatar, timezone, locale, notifPrefs }) })
+      toast.success('Profil mis à jour')
+      onUpdated(r.user)
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  async function changePassword() {
+    if (!pwd.current || !pwd.next) return toast.error('Champs requis')
+    if (pwd.next !== pwd.confirm) return toast.error('Les mots de passe ne correspondent pas')
+    if (pwd.next.length < 8) return toast.error('Min. 8 caractères')
+    setPwdLoading(true)
+    try {
+      await apiFetch('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: pwd.current, newPassword: pwd.next }) })
+      toast.success('Mot de passe modifié')
+      setPwd({ current: '', next: '', confirm: '' })
+    } catch (e) { toast.error(e.message) } finally { setPwdLoading(false) }
+  }
+  async function deleteAccount() {
+    if (!delPwd) return toast.error('Mot de passe requis')
+    try {
+      await apiFetch('/auth/delete-account', { method: 'POST', body: JSON.stringify({ password: delPwd }) })
+      toast.success('Compte supprimé')
+      onLogout()
+    } catch (e) { toast.error(e.message) }
+  }
+
+  const input = "w-full h-10 px-3 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)] text-white text-sm focus:outline-none focus:border-white/25"
+  const label = "text-[11px] text-3 mb-1.5 block"
+
+  return (
+    <div className="space-y-4 max-w-3xl anim-fade-up">
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight">Mon profil</h1>
+        <p className="text-sm text-2 mt-1">Gérez vos informations et préférences.</p>
+      </div>
+
+      <section className="surface p-5 space-y-4">
+        <div className="flex items-center gap-4">
+          <div className="relative">
+            {avatar ? (
+              <img src={avatar} alt="avatar" className="w-16 h-16 rounded-2xl object-cover" />
+            ) : (
+              <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-xl font-bold text-white" style={{ background: me.avatarColor || '#3a5375' }}>
+                {(firstName[0] || 'U').toUpperCase()}
+              </div>
+            )}
+            <label className="absolute -bottom-1 -right-1 w-7 h-7 rounded-full bg-white text-[#0a1428] flex items-center justify-center cursor-pointer shadow-lg">
+              <Camera className="w-3.5 h-3.5" />
+              <input type="file" accept="image/*" className="hidden" onChange={handleAvatarFile} />
+            </label>
+          </div>
+          {avatar && (
+            <button onClick={() => setAvatar(null)} className="text-[12px] text-3 hover:text-red-400 transition">Retirer la photo</button>
+          )}
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className={label}>Prénom *</label>
+            <input value={firstName} onChange={e => setFirstName(e.target.value)} className={input} />
+          </div>
+          <div>
+            <label className={label}>Nom</label>
+            <input value={lastName} onChange={e => setLastName(e.target.value)} className={input} />
+          </div>
+        </div>
+        <div>
+          <label className={label}>Email</label>
+          <input type="email" value={email} onChange={e => setEmail(e.target.value)} className={input} />
+        </div>
+        <div>
+          <label className={label}>Bio (courte)</label>
+          <textarea value={bio} onChange={e => setBio(e.target.value.slice(0, 200))} rows={2}
+            className="w-full px-3 py-2 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)] text-white text-sm focus:outline-none focus:border-white/25 resize-none" />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className={label}>Fuseau horaire</label>
+            <select value={timezone} onChange={e => setTimezone(e.target.value)} className={input}>
+              <option value="Europe/Zurich">Europe/Zurich</option>
+              <option value="Europe/Paris">Europe/Paris</option>
+              <option value="Europe/London">Europe/London</option>
+              <option value="America/New_York">America/New_York</option>
+              <option value="America/Los_Angeles">America/Los_Angeles</option>
+              <option value="Asia/Tokyo">Asia/Tokyo</option>
+            </select>
+          </div>
+          <div>
+            <label className={label}>Langue</label>
+            <select value={locale} onChange={e => setLocale(e.target.value)} className={input}>
+              <option value="fr">Français</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+        </div>
+        <button onClick={save} disabled={saving} className="h-10 px-5 rounded-xl btn-primary text-sm inline-flex items-center gap-2">
+          {saving && <Loader2 className="w-4 h-4 animate-spin" />} Enregistrer
+        </button>
+      </section>
+
+      <section className="surface p-5 space-y-3">
+        <h2 className="text-lg font-semibold flex items-center gap-2"><BellIcon className="w-4 h-4" /> Préférences de notifications</h2>
+        <div className="space-y-2">
+          {[
+            { k: 'taskAssigned', label: "Nouvelle tâche assignée" },
+            { k: 'taskValidated', label: "Tâche validée ou refusée" },
+            { k: 'mentions', label: "Mentions dans le chat" },
+            { k: 'comments', label: "Nouveaux commentaires" },
+            { k: 'deadlines', label: "Rappels de deadline" },
+          ].map(({ k, label }) => (
+            <label key={k} className="flex items-center justify-between p-3 rounded-lg bg-white/[0.02] border border-white/5 cursor-pointer">
+              <span className="text-sm">{label}</span>
+              <input type="checkbox" checked={!!notifPrefs[k]} onChange={e => setNotifPrefs({ ...notifPrefs, [k]: e.target.checked })} className="w-4 h-4 accent-white" />
+            </label>
+          ))}
+        </div>
+        <button onClick={save} disabled={saving} className="h-9 px-4 rounded-lg btn-ghost text-[13px]">Sauvegarder les préférences</button>
+      </section>
+
+      <section className="surface p-5 space-y-3">
+        <h2 className="text-lg font-semibold flex items-center gap-2"><Lock className="w-4 h-4" /> Changer de mot de passe</h2>
+        <input type="password" placeholder="Mot de passe actuel" value={pwd.current} onChange={e => setPwd({ ...pwd, current: e.target.value })} className={input} />
+        <input type="password" placeholder="Nouveau mot de passe (8 caractères min.)" value={pwd.next} onChange={e => setPwd({ ...pwd, next: e.target.value })} className={input} />
+        <input type="password" placeholder="Confirmer le nouveau mot de passe" value={pwd.confirm} onChange={e => setPwd({ ...pwd, confirm: e.target.value })} className={input} />
+        <button onClick={changePassword} disabled={pwdLoading} className="h-10 px-5 rounded-xl btn-primary text-sm inline-flex items-center gap-2">
+          {pwdLoading && <Loader2 className="w-4 h-4 animate-spin" />} Modifier le mot de passe
+        </button>
+      </section>
+
+      <section className="surface p-5 space-y-3">
+        <h2 className="text-lg font-semibold flex items-center gap-2"><HelpCircle className="w-4 h-4" /> Aide</h2>
+        <button onClick={onReplayTutorial} className="h-9 px-4 rounded-lg btn-ghost text-[13px] inline-flex items-center gap-2">
+          <Sparkles className="w-3.5 h-3.5" /> Revoir le tutoriel
+        </button>
+      </section>
+
+      <section className="surface p-5 space-y-3 border-red-500/20">
+        <h2 className="text-lg font-semibold text-red-400 flex items-center gap-2"><AlertCircle className="w-4 h-4" /> Zone dangereuse</h2>
+        <p className="text-[12.5px] text-2">La suppression est définitive. Vos messages et tâches créés seront conservés mais anonymisés.</p>
+        {!showDelete ? (
+          <button onClick={() => setShowDelete(true)} className="h-9 px-4 rounded-lg text-[13px] bg-red-500/10 border border-red-500/30 text-red-300 hover:bg-red-500/20 transition">
+            Supprimer mon compte
+          </button>
+        ) : (
+          <div className="space-y-2">
+            <input type="password" placeholder="Confirmez avec votre mot de passe" value={delPwd} onChange={e => setDelPwd(e.target.value)} className={input} />
+            <div className="flex gap-2">
+              <button onClick={() => { setShowDelete(false); setDelPwd('') }} className="h-9 px-3 rounded-lg btn-ghost text-[13px]">Annuler</button>
+              <button onClick={deleteAccount} className="h-9 px-4 rounded-lg text-[13px] bg-red-500 text-white hover:bg-red-600 transition">Supprimer définitivement</button>
+            </div>
+          </div>
+        )}
+      </section>
+    </div>
+  )
+}
+
+// ================================================================
+// WORKSPACE SETTINGS VIEW
+// ================================================================
+function WorkspaceSettingsView({ workspace, canManage, isOwner, users, onUpdated, onLeft, onDeleted }) {
+  const [tab, setTab] = useState('general')
+  const [name, setName] = useState(workspace.name)
+  const [description, setDescription] = useState(workspace.description || '')
+  const [emoji, setEmoji] = useState(workspace.emoji || workspace.icon || '🚀')
+  const [color, setColor] = useState(workspace.color || '#3b82f6')
+  const [saving, setSaving] = useState(false)
+  const [invitations, setInvitations] = useState([])
+  const [invRole, setInvRole] = useState('member')
+  const [audit, setAudit] = useState([])
+
+  async function save() {
+    setSaving(true)
+    try {
+      const r = await apiFetch('/workspace', { method: 'PATCH', body: JSON.stringify({ name, description, emoji, color, icon: (name[0] || 'W').toUpperCase() }) })
+      toast.success('Espace mis à jour')
+      onUpdated(r)
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+
+  async function loadInvitations() {
+    try { setInvitations(await apiFetch('/workspace/invitations')) } catch {}
+  }
+  async function createInvitation() {
+    try {
+      const inv = await apiFetch('/workspace/invitations', { method: 'POST', body: JSON.stringify({ role: invRole, expiresInDays: 30 }) })
+      setInvitations(prev => [inv, ...prev])
+      toast.success('Invitation créée')
+    } catch (e) { toast.error(e.message) }
+  }
+  async function revokeInvitation(id) {
+    try {
+      await apiFetch(`/workspace/invitations/${id}`, { method: 'DELETE' })
+      setInvitations(prev => prev.filter(i => i.id !== id))
+    } catch (e) { toast.error(e.message) }
+  }
+  async function loadAudit() {
+    try { setAudit(await apiFetch('/workspace/audit')) } catch {}
+  }
+
+  useEffect(() => {
+    if (tab === 'invitations') loadInvitations()
+    if (tab === 'audit') loadAudit()
+  }, [tab])
+
+  async function leaveWorkspace() {
+    if (!confirm('Quitter cet espace ? Vous perdrez l\'accès aux tâches et discussions.')) return
+    try {
+      await apiFetch('/workspace/leave', { method: 'POST' })
+      toast.success('Vous avez quitté l\'espace')
+      onLeft()
+    } catch (e) { toast.error(e.message) }
+  }
+  async function transferOwnership(userId) {
+    if (!confirm('Transférer la propriété à ce membre ? Vous deviendrez Admin.')) return
+    try {
+      await apiFetch('/workspace/transfer-ownership', { method: 'POST', body: JSON.stringify({ targetUserId: userId }) })
+      toast.success('Propriété transférée')
+      onUpdated({ ...workspace, ownerId: userId })
+    } catch (e) { toast.error(e.message) }
+  }
+  async function toggleArchive() {
+    try {
+      const action = workspace.archivedAt ? 'unarchive' : 'archive'
+      await apiFetch(`/workspace/${action}`, { method: 'POST' })
+      toast.success(workspace.archivedAt ? 'Espace désarchivé' : 'Espace archivé')
+      onUpdated({ ...workspace, archivedAt: workspace.archivedAt ? null : new Date() })
+    } catch (e) { toast.error(e.message) }
+  }
+  async function deleteWorkspace() {
+    const confirmation = prompt(`Pour supprimer définitivement, tapez le nom de l'espace : ${workspace.name}`)
+    if (confirmation !== workspace.name) return toast.error('Confirmation incorrecte')
+    try {
+      await apiFetch('/workspace', { method: 'DELETE' })
+      toast.success('Espace supprimé')
+      onDeleted()
+    } catch (e) { toast.error(e.message) }
+  }
+
+  const input = "w-full h-10 px-3 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)] text-white text-sm focus:outline-none focus:border-white/25"
+  const colors = ['#3b82f6', '#8b5cf6', '#ec4899', '#f97316', '#10b981', '#14b8a6', '#eab308', '#ef4444']
+  const emojis = ['🚀', '🎯', '📚', '💼', '🎨', '⚡', '🌟', '🔥', '🌱', '🏆', '💡', '🎪']
+
+  const tabs = [
+    { k: 'general', label: 'Général', icon: Settings },
+    ...(canManage ? [{ k: 'invitations', label: 'Invitations', icon: Users }] : []),
+    ...(canManage ? [{ k: 'audit', label: 'Journal', icon: Activity }] : []),
+    { k: 'danger', label: 'Zone dangereuse', icon: AlertCircle },
+  ]
+
+  return (
+    <div className="space-y-4 max-w-3xl anim-fade-up">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Paramètres · {workspace.name}</h1>
+          <p className="text-sm text-2 mt-1">Configurez votre espace de travail.</p>
+        </div>
+        {workspace.archivedAt && (
+          <span className="text-[11px] px-2 py-1 rounded-full bg-orange-500/15 text-orange-300 border border-orange-500/30">Archivé</span>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-1 border-b border-[color:var(--w-border)]">
+        {tabs.map(t => (
+          <button key={t.k} onClick={() => setTab(t.k)}
+            className={`px-3 py-2 text-[13px] inline-flex items-center gap-1.5 border-b-2 transition ${
+              tab === t.k ? 'border-white text-white' : 'border-transparent text-3 hover:text-white'
+            }`}>
+            <t.icon className="w-3.5 h-3.5" /> {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'general' && (
+        <section className="surface p-5 space-y-4">
+          <div className="flex items-center gap-4">
+            <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-2xl font-bold text-white" style={{ background: color }}>{emoji}</div>
+            <div>
+              <p className="text-sm font-semibold">{name}</p>
+              <p className="text-[11.5px] text-3">{workspace.inviteCode}</p>
+            </div>
+          </div>
+          <div>
+            <label className="text-[11px] text-3 mb-1.5 block">Nom *</label>
+            <input value={name} onChange={e => setName(e.target.value)} disabled={!canManage} className={input} />
+          </div>
+          <div>
+            <label className="text-[11px] text-3 mb-1.5 block">Description</label>
+            <textarea value={description} onChange={e => setDescription(e.target.value)} disabled={!canManage} rows={3}
+              className="w-full px-3 py-2.5 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)] text-white text-sm focus:outline-none focus:border-white/25 resize-none disabled:opacity-60" />
+          </div>
+          {canManage && (
+            <>
+              <div>
+                <label className="text-[11px] text-3 mb-2 block">Emoji</label>
+                <div className="grid grid-cols-6 gap-2">
+                  {emojis.map(e => (
+                    <button key={e} onClick={() => setEmoji(e)}
+                      className={`h-10 rounded-lg text-lg transition ${emoji === e ? 'bg-white/[0.08] ring-1 ring-white/30' : 'bg-white/[0.03] hover:bg-white/[0.06]'}`}>{e}</button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="text-[11px] text-3 mb-2 block">Couleur</label>
+                <div className="flex flex-wrap gap-2">
+                  {colors.map(c => (
+                    <button key={c} onClick={() => setColor(c)}
+                      className={`w-8 h-8 rounded-full transition ${color === c ? 'ring-2 ring-white ring-offset-2 ring-offset-[color:var(--w-surface)]' : 'opacity-70 hover:opacity-100'}`}
+                      style={{ background: c }} />
+                  ))}
+                </div>
+              </div>
+              <button onClick={save} disabled={saving} className="h-10 px-5 rounded-xl btn-primary text-sm inline-flex items-center gap-2">
+                {saving && <Loader2 className="w-4 h-4 animate-spin" />} Enregistrer
+              </button>
+            </>
+          )}
+        </section>
+      )}
+
+      {tab === 'invitations' && (
+        <section className="surface p-5 space-y-4">
+          <div>
+            <p className="text-[13px] text-2 mb-2">Code global du workspace :</p>
+            <div className="flex items-center gap-2 p-3 rounded-lg bg-white/[0.03] border border-white/10">
+              <code className="flex-1 text-sm font-mono">{workspace.inviteCode}</code>
+              <button onClick={() => { navigator.clipboard.writeText(workspace.inviteCode); toast.success('Copié') }} className="icon-btn"><Copy className="w-3.5 h-3.5" /></button>
+            </div>
+          </div>
+          <div className="flex gap-2 items-end">
+            <div className="flex-1">
+              <label className="text-[11px] text-3 mb-1.5 block">Rôle attribué à l'invitation</label>
+              <select value={invRole} onChange={e => setInvRole(e.target.value)} className={input}>
+                <option value="member">Member</option>
+                <option value="leader">Leader</option>
+                <option value="admin">Admin</option>
+                <option value="viewer">Viewer</option>
+                <option value="teacher">Teacher</option>
+              </select>
+            </div>
+            <button onClick={createInvitation} className="h-10 px-4 rounded-xl btn-primary text-sm inline-flex items-center gap-1">
+              <Plus className="w-4 h-4" /> Nouvelle invitation
+            </button>
+          </div>
+          <div className="space-y-2">
+            {invitations.length === 0 && <p className="text-[12.5px] text-3 italic">Aucune invitation. Le code global du workspace suffit pour rejoindre.</p>}
+            {invitations.map(inv => {
+              const expired = inv.expiresAt && new Date(inv.expiresAt) < new Date()
+              return (
+                <div key={inv.id} className="flex items-center gap-2 p-3 rounded-lg bg-white/[0.03] border border-white/10">
+                  <code className="text-sm font-mono flex-1">{inv.token}</code>
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-white/10">{inv.role}</span>
+                  {expired && <span className="text-[11px] px-2 py-0.5 rounded-full bg-red-500/15 text-red-300">Expiré</span>}
+                  <button onClick={() => { navigator.clipboard.writeText(inv.token); toast.success('Copié') }} className="icon-btn"><Copy className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => revokeInvitation(inv.id)} className="icon-btn text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      )}
+
+      {tab === 'audit' && (
+        <section className="surface p-5 space-y-2">
+          <p className="text-[13px] text-2">Historique des actions importantes (200 dernières).</p>
+          {audit.length === 0 && <p className="text-[12.5px] text-3 italic pt-2">Aucun événement enregistré pour l'instant.</p>}
+          {audit.map(l => (
+            <div key={l.id} className="flex items-center gap-2 py-2 border-b border-white/5 last:border-0">
+              <Activity className="w-3.5 h-3.5 text-3" />
+              <span className="text-[12.5px] font-medium">{l.action}</span>
+              <span className="text-[11.5px] text-3">· {l.actor?.firstName || 'système'}</span>
+              <div className="flex-1" />
+              <span className="text-[11px] text-3 tabular-nums">{new Date(l.createdAt).toLocaleString('fr-FR')}</span>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {tab === 'danger' && (
+        <div className="space-y-3">
+          <section className="surface p-5 space-y-2">
+            <h3 className="text-sm font-semibold flex items-center gap-2"><DoorOpen className="w-4 h-4" /> Quitter cet espace</h3>
+            <p className="text-[12.5px] text-2">Vous perdrez l'accès aux tâches, discussions et notifications de cet espace.</p>
+            <button onClick={leaveWorkspace} className="h-9 px-4 rounded-lg btn-ghost text-[13px] text-orange-300 border border-orange-500/30 hover:bg-orange-500/10">Quitter l'espace</button>
+          </section>
+
+          {isOwner && (
+            <section className="surface p-5 space-y-2">
+              <h3 className="text-sm font-semibold flex items-center gap-2"><Crown className="w-4 h-4" /> Transférer la propriété</h3>
+              <p className="text-[12.5px] text-2">Un autre membre deviendra le nouvel Owner. Vous conserverez un rôle Admin.</p>
+              <div className="space-y-1.5 pt-1">
+                {Object.values(users || {}).filter(u => u.id !== workspace.ownerId).slice(0, 8).map(u => (
+                  <div key={u.id} className="flex items-center gap-2 p-2 rounded-lg bg-white/[0.02] border border-white/5">
+                    <UserAvatar user={u} size={26} />
+                    <p className="flex-1 text-[13px]">{u.firstName} {u.lastName}</p>
+                    <button onClick={() => transferOwnership(u.id)} className="h-8 px-3 rounded-md btn-ghost text-[12px]">Transférer</button>
+                  </div>
+                ))}
+                {Object.values(users || {}).filter(u => u.id !== workspace.ownerId).length === 0 && (
+                  <p className="text-[12px] text-3 italic">Aucun autre membre à qui transférer.</p>
+                )}
+              </div>
+            </section>
+          )}
+
+          {canManage && (
+            <section className="surface p-5 space-y-2">
+              <h3 className="text-sm font-semibold flex items-center gap-2"><Archive className="w-4 h-4" /> {workspace.archivedAt ? 'Désarchiver' : 'Archiver'}</h3>
+              <p className="text-[12.5px] text-2">
+                {workspace.archivedAt
+                  ? 'Réactive cet espace et le rend de nouveau accessible.'
+                  : "Marque l'espace comme inactif. Les données sont conservées mais l'espace n'apparaît plus comme actif."}
+              </p>
+              <button onClick={toggleArchive} className="h-9 px-4 rounded-lg btn-ghost text-[13px]">
+                {workspace.archivedAt ? 'Désarchiver' : 'Archiver l\'espace'}
+              </button>
+            </section>
+          )}
+
+          {isOwner && (
+            <section className="surface p-5 space-y-2 border-red-500/20">
+              <h3 className="text-sm font-semibold text-red-400 flex items-center gap-2"><Trash className="w-4 h-4" /> Supprimer définitivement</h3>
+              <p className="text-[12.5px] text-2">Toutes les données de cet espace seront supprimées : tâches, groupes, membres, messages, notifications. Irréversible.</p>
+              <button onClick={deleteWorkspace} className="h-9 px-4 rounded-lg text-[13px] bg-red-500/10 border border-red-500/30 text-red-300 hover:bg-red-500/20 transition">Supprimer l'espace</button>
+            </section>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+// ================================================================
 // APP SHELL
 // ================================================================
 export default function App() {
@@ -2521,6 +3328,7 @@ export default function App() {
   const [showWelcome, setShowWelcome] = useState(false)
   const [onboardingMode, setOnboardingMode] = useState(null) // 'create' | 'join' | null (opened from switcher)
   const [invitePanelOpen, setInvitePanelOpen] = useState(false)
+  const [showTutorial, setShowTutorial] = useState(false)
   const notifs = useNotifications(refreshKey)
 
   async function loadWorkspaceData() {
@@ -2572,6 +3380,8 @@ export default function App() {
     setWorkspaces(prev => [...prev, w])
     await switchWorkspace(w)
     setOnboardingMode(null)
+    // First workspace ever \u2192 launch tutorial
+    if (!me?.tutorialSeen) setShowTutorial(true)
   }
 
   async function onWorkspaceJoined(w) {
@@ -2581,6 +3391,16 @@ export default function App() {
     const found = wsList.find(x => x.id === w.id)
     if (found) await switchWorkspace(found)
     setOnboardingMode(null)
+    if (!me?.tutorialSeen) setShowTutorial(true)
+  }
+
+  async function finishTutorial(completed) {
+    setShowTutorial(false)
+    try {
+      const r = await apiFetch('/auth/me', { method: 'PATCH', body: JSON.stringify({ tutorialSeen: true }) })
+      setMe(r.user)
+    } catch {}
+    if (completed) toast.success("Tutoriel terminé — bienvenue !")
   }
 
   function onLogin() { bootstrap(true) }
@@ -2642,6 +3462,8 @@ export default function App() {
     ...(isAdmin ? [{ key: 'pilot', label: 'Pilotage', icon: BarChart3 }] : []),
     ...(isAdmin ? [{ key: 'admin_groups', label: 'Tous groupes', icon: Shield }] : []),
     { key: 'members', label: 'Membres', icon: UserIcon },
+    { key: 'settings', label: 'Paramètres', icon: Settings },
+    { key: 'profile', label: 'Mon profil', icon: UserIcon },
   ].filter(n => !n.hidden)
 
   const Sidebar = (
@@ -2681,16 +3503,20 @@ export default function App() {
         )}
       </nav>
       <div className="p-3 border-t border-[color:var(--w-border)]">
-        <div className="flex items-center gap-2.5 p-2 rounded-xl hover:bg-white/[0.03] transition">
-          <UserAvatar user={me} size={32} />
+        <button onClick={() => goto('profile')} className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-white/[0.03] transition text-left">
+          {me.avatar ? (
+            <img src={me.avatar} alt="" className="w-8 h-8 rounded-lg object-cover shrink-0" />
+          ) : (
+            <UserAvatar user={me} size={32} />
+          )}
           <div className="flex-1 min-w-0">
             <p className="text-[13px] font-medium truncate">{me.firstName}</p>
             <p className="text-[10.5px] text-3 truncate">{ROLE_LABEL[role] || role}</p>
           </div>
-          <button onClick={logout} className="icon-btn" title="Déconnexion">
+          <button onClick={(e) => { e.stopPropagation(); logout() }} className="icon-btn" title="Déconnexion">
             <LogOut className="w-3.5 h-3.5" />
           </button>
-        </div>
+        </button>
       </div>
     </div>
   )
@@ -2711,6 +3537,11 @@ export default function App() {
         onMarkRead={(id) => apiFetch('/notifications/mark-read', { method: 'POST', body: JSON.stringify({ id }) }).then(() => notifs.reload())}
         onMarkAllRead={() => apiFetch('/notifications/mark-read', { method: 'POST', body: '{}' }).then(() => notifs.reload())} />
       case 'pilot': return <PilotView users={users} groups={groups} refreshKey={refreshKey} onOpenTask={openTask} onNavigate={goto} />
+      case 'profile': return <ProfileView me={me} onUpdated={u => setMe(u)} onLogout={logout} onReplayTutorial={() => setShowTutorial(true)} />
+      case 'settings': return <WorkspaceSettingsView workspace={workspace} canManage={isAdmin} isOwner={role === 'owner'} users={users}
+        onUpdated={w => { setWorkspace(prev => ({ ...prev, ...w })); setWorkspaces(prev => prev.map(x => x.id === workspace.id ? { ...x, ...w } : x)) }}
+        onLeft={() => { const rest = workspaces.filter(x => x.id !== workspace.id); setWorkspaces(rest); if (rest.length) switchWorkspace(rest[0]); else { setWorkspace(null); setView('dashboard') } }}
+        onDeleted={() => { const rest = workspaces.filter(x => x.id !== workspace.id); setWorkspaces(rest); if (rest.length) switchWorkspace(rest[0]); else { setWorkspace(null); setView('dashboard') } }} />
       default: return (
         <div className="anim-fade-up surface p-16 text-center">
           <p className="text-sm text-2">Cette section arrive bientôt.</p>
@@ -2791,6 +3622,7 @@ export default function App() {
           onClose={() => setInvitePanelOpen(false)}
           onRegenerated={code => setWorkspace(w => ({ ...w, inviteCode: code }))} />
       )}
+      {showTutorial && <TutorialTour onFinish={finishTutorial} />}
     </div>
   )
 }
