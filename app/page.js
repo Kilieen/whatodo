@@ -13,7 +13,7 @@ import {
   Bell, LogOut, Moon, Sun, Plus, ChevronLeft, ChevronRight, Menu, X,
   Clock, CheckCircle2, AlertCircle, Paperclip, Send, CheckCheck,
   Upload, FileText, Edit3, Loader2, Shield, Search, BarChart3, Settings,
-  User as UserIcon, ArrowUpRight, GanttChart, MoreHorizontal, Filter
+  User as UserIcon, ArrowUpRight, GanttChart, MoreHorizontal, Filter, Trash2
 } from 'lucide-react'
 
 import { Input } from '@/components/ui/input'
@@ -916,18 +916,21 @@ function AllGroupsView({ groups, onOpenGroup }) {
 // ================================================================
 // TASK DIALOG
 // ================================================================
-function TaskDialog({ task, open, onClose, me, users, groups, onUpdated }) {
+function TaskDialog({ task, open, onClose, me, users, groups, onUpdated, onDeleted }) {
   const [editing, setEditing] = useState(null)
   const [comment, setComment] = useState('')
   const [saving, setSaving] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
-  useEffect(() => { setEditing(task ? { ...task } : null); setComment('') }, [task])
+  useEffect(() => { setEditing(task ? { ...task } : null); setComment(''); setConfirmDelete(false) }, [task])
   if (!task || !editing) return null
 
   const group = groups.find(g => g.id === task.groupId)
-  const canManage = me.role === 'admin' || (me.role === 'leader' && group?.leaderId === me.id)
+  const canManage = ['owner','admin'].includes(me.role) || (me.role === 'leader' && group?.leaderId === me.id)
   const isAssignee = task.assignees?.includes(me.id)
+  const isCreator = task.createdBy === me.id
   const canEdit = canManage || isAssignee
+  const canDelete = canManage || isCreator
 
   async function patch(patch) {
     setSaving(true)
@@ -984,6 +987,15 @@ function TaskDialog({ task, open, onClose, me, users, groups, onUpdated }) {
       toast.success(approved ? 'Validée' : 'Correction demandée')
       onUpdated(updated)
     } catch (e) { toast.error(e.message) }
+  }
+
+  async function deleteTask() {
+    try {
+      await apiFetch(`/tasks/${task.id}`, { method: 'DELETE' })
+      toast.success('Tâche supprimée')
+      onDeleted?.(task)
+      onClose()
+    } catch (e) { toast.error(e.message); setConfirmDelete(false) }
   }
 
   const inputCls = "w-full h-10 px-3 rounded-xl bg-[color:var(--w-surface)] border border-[color:var(--w-border)] text-white text-sm placeholder:text-3 focus:outline-none focus:border-white/20 transition"
@@ -1128,7 +1140,7 @@ function TaskDialog({ task, open, onClose, me, users, groups, onUpdated }) {
           </div>
 
           {/* Actions */}
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2 items-center">
             {isAssignee && task.status !== 'review' && task.status !== 'done' && (
               <button onClick={() => patch({ status: 'review' })}
                 className="h-9 px-4 rounded-xl btn-primary text-sm inline-flex items-center gap-1">
@@ -1147,7 +1159,30 @@ function TaskDialog({ task, open, onClose, me, users, groups, onUpdated }) {
                 </button>
               </>
             )}
+            {canDelete && (
+              <button onClick={() => setConfirmDelete(true)}
+                className="h-9 px-3 rounded-xl text-red-300/80 hover:text-red-200 hover:bg-red-500/10 text-sm inline-flex items-center gap-1 transition ml-auto">
+                <Trash2 className="w-4 h-4" /> Supprimer
+              </button>
+            )}
           </div>
+
+          {confirmDelete && (
+            <div className="p-4 rounded-xl border border-red-500/30 bg-red-500/[0.05] anim-scale">
+              <p className="text-sm font-medium text-red-200 mb-1">Supprimer cette tâche ?</p>
+              <p className="text-[12px] text-2 mb-3">
+                La tâche sera déplacée dans la corbeille. Un Owner ou Admin pourra la restaurer.
+              </p>
+              <div className="flex gap-2">
+                <button onClick={() => setConfirmDelete(false)}
+                  className="h-9 px-4 rounded-xl btn-ghost text-sm">Annuler</button>
+                <button onClick={deleteTask}
+                  className="h-9 px-4 rounded-xl bg-red-500/90 hover:bg-red-500 text-white text-sm font-medium transition inline-flex items-center gap-1">
+                  <Trash2 className="w-4 h-4" /> Supprimer
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Comments */}
           <div className="border-t border-[color:var(--w-border)] pt-5">
@@ -1293,8 +1328,265 @@ function CreateTaskDialog({ open, onClose, me, groups, onCreated }) {
 }
 
 // ================================================================
-// MEMBERS MANAGEMENT
+// CALENDAR VIEW (full page)
 // ================================================================
+function CalendarView({ me, users, onOpenTask, onCreate, refreshKey }) {
+  const [view, setView] = useState('month') // month | week | day
+  const [ref, setRef] = useState(new Date())
+  const [scope, setScope] = useState('group') // mine | group | all
+  const [tasks, setTasks] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [selectedDay, setSelectedDay] = useState(null)
+
+  const range = useMemo(() => {
+    const d = new Date(ref)
+    if (view === 'month') {
+      const first = new Date(d.getFullYear(), d.getMonth(), 1)
+      const last = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59)
+      return { from: first, to: last }
+    }
+    if (view === 'week') {
+      const day = (d.getDay() + 6) % 7
+      const start = new Date(d); start.setDate(d.getDate() - day); start.setHours(0,0,0,0)
+      const end = new Date(start); end.setDate(start.getDate() + 6); end.setHours(23,59,59,999)
+      return { from: start, to: end }
+    }
+    const s = new Date(d); s.setHours(0,0,0,0)
+    const e = new Date(d); e.setHours(23,59,59,999)
+    return { from: s, to: e }
+  }, [ref, view])
+
+  async function load() {
+    setLoading(true)
+    try {
+      const from = range.from.toISOString()
+      const to = range.to.toISOString()
+      const t = await apiFetch(`/calendar?from=${from}&to=${to}&scope=${scope}`)
+      setTasks(t)
+    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+  }
+  useEffect(() => { load() }, [ref, view, scope, refreshKey])
+
+  function shift(delta) {
+    const d = new Date(ref)
+    if (view === 'month') d.setMonth(d.getMonth() + delta)
+    if (view === 'week') d.setDate(d.getDate() + delta * 7)
+    if (view === 'day') d.setDate(d.getDate() + delta)
+    setRef(d)
+  }
+
+  const tasksByDay = useMemo(() => {
+    const m = {}
+    for (const t of tasks) {
+      const d = new Date(t.dueDate)
+      const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+      m[key] = m[key] || []
+      m[key].push(t)
+    }
+    return m
+  }, [tasks])
+  const dayKey = (d) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+
+  const today = new Date()
+  const title = view === 'month'
+    ? ref.toLocaleDateString('fr-CH', { month: 'long', year: 'numeric' })
+    : view === 'week'
+      ? `Semaine du ${range.from.toLocaleDateString('fr-CH', { day: '2-digit', month: 'short' })} au ${range.to.toLocaleDateString('fr-CH', { day: '2-digit', month: 'short' })}`
+      : ref.toLocaleDateString('fr-CH', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+
+  return (
+    <div className="space-y-5 anim-fade-up">
+      <div className="flex items-end justify-between flex-wrap gap-3">
+        <div>
+          <p className="text-sm text-2 mb-1">Vue calendrier</p>
+          <h1 className="t-h1">Calendrier</h1>
+          <p className="text-sm text-2 mt-2 capitalize">{title}</p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="pill-group">
+            <button className={`pill ${scope === 'mine' ? 'pill-active' : ''}`} onClick={() => setScope('mine')}>À moi</button>
+            <button className={`pill ${scope === 'group' ? 'pill-active' : ''}`} onClick={() => setScope('group')}>Groupe</button>
+            {(me.role === 'owner' || me.role === 'admin' || me.role === 'teacher') && (
+              <button className={`pill ${scope === 'all' ? 'pill-active' : ''}`} onClick={() => setScope('all')}>Tout</button>
+            )}
+          </div>
+          <div className="pill-group">
+            <button className={`pill ${view === 'month' ? 'pill-active' : ''}`} onClick={() => setView('month')}>Mois</button>
+            <button className={`pill ${view === 'week' ? 'pill-active' : ''}`} onClick={() => setView('week')}>Semaine</button>
+            <button className={`pill ${view === 'day' ? 'pill-active' : ''}`} onClick={() => setView('day')}>Jour</button>
+          </div>
+          <div className="flex items-center gap-1">
+            <button onClick={() => shift(-1)} className="icon-btn"><ChevronLeft className="w-4 h-4" /></button>
+            <button onClick={() => setRef(new Date())} className="h-9 px-3 rounded-full btn-ghost text-[12.5px]">Aujourd'hui</button>
+            <button onClick={() => shift(1)} className="icon-btn"><ChevronRight className="w-4 h-4" /></button>
+          </div>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="p-12 flex justify-center"><Loader2 className="animate-spin text-white/30" /></div>
+      ) : view === 'month' ? (
+        <MonthGrid ref={ref} tasksByDay={tasksByDay} onOpenTask={onOpenTask} onDayClick={setSelectedDay} today={today} />
+      ) : view === 'week' ? (
+        <WeekView range={range} tasksByDay={tasksByDay} onOpenTask={onOpenTask} today={today} />
+      ) : (
+        <DayView day={ref} tasks={tasksByDay[dayKey(ref)] || []} onOpenTask={onOpenTask} onCreate={onCreate} />
+      )}
+
+      {selectedDay && (
+        <Dialog open onOpenChange={v => !v && setSelectedDay(null)}>
+          <DialogContent className="w-glass max-w-md rounded-2xl border-white/10">
+            <DialogHeader><DialogTitle>{fmtDateFull(selectedDay)}</DialogTitle></DialogHeader>
+            <div className="space-y-1.5 max-h-96 overflow-y-auto">
+              {(tasksByDay[dayKey(selectedDay)] || []).length === 0 && (
+                <p className="text-sm text-2 py-4 text-center">Aucune tâche ce jour.</p>
+              )}
+              {(tasksByDay[dayKey(selectedDay)] || []).map(t => (
+                <button key={t.id} onClick={() => { setSelectedDay(null); onOpenTask(t) }}
+                  className="w-full text-left surface-flat p-3 hover:border-white/15 transition flex items-center gap-3">
+                  <span className={`dot ${STATUS[t.status].dot}`} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{t.title}</p>
+                    <p className="text-[11px] text-3">{STATUS[t.status].label}</p>
+                  </div>
+                  <div className="flex -space-x-1.5">
+                    {(t.assignees || []).slice(0, 3).map(id => <UserAvatar key={id} user={users[id]} size={20} />)}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
+    </div>
+  )
+}
+
+function MonthGrid({ ref, tasksByDay, onOpenTask, onDayClick, today }) {
+  const year = ref.getFullYear(), month = ref.getMonth()
+  const first = new Date(year, month, 1)
+  const startOffset = (first.getDay() + 6) % 7
+  const daysInMonth = new Date(year, month + 1, 0).getDate()
+  const cells = []
+  for (let i = 0; i < startOffset; i++) cells.push(null)
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d)
+  while (cells.length % 7 !== 0) cells.push(null)
+  const isToday = d => today.getFullYear() === year && today.getMonth() === month && today.getDate() === d
+
+  return (
+    <div className="surface p-4">
+      <div className="grid grid-cols-7 gap-2 text-center text-[11px] text-3 mb-2 font-medium">
+        {['Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi','Dimanche'].map(d => <div key={d}>{d}</div>)}
+      </div>
+      <div className="grid grid-cols-7 gap-2">
+        {cells.map((d, i) => {
+          if (!d) return <div key={i} className="min-h-[100px]" />
+          const key = `${year}-${month}-${d}`
+          const dayTasks = tasksByDay[key] || []
+          const active = isToday(d)
+          return (
+            <button key={i} onClick={() => onDayClick(new Date(year, month, d))}
+              className={`min-h-[100px] p-2 rounded-xl text-left border transition-all ${
+                active ? 'border-white/40 bg-white/[0.03]' :
+                'border-[color:var(--w-border)] hover:border-white/15 hover:bg-white/[0.02]'
+              }`}>
+              <div className="flex items-center justify-between mb-1.5">
+                <span className={`text-[12px] font-semibold ${active ? 'text-white' : 'text-2'}`}>{d}</span>
+                {dayTasks.length > 0 && <span className="text-[10px] text-3 tabular-nums">{dayTasks.length}</span>}
+              </div>
+              <div className="space-y-1">
+                {dayTasks.slice(0, 3).map(t => (
+                  <div key={t.id} onClick={(e) => { e.stopPropagation(); onOpenTask(t) }}
+                    className="text-[11px] px-1.5 py-0.5 rounded truncate cursor-pointer hover:bg-white/[0.05] flex items-center gap-1"
+                    title={t.title}>
+                    <span className={`dot ${STATUS[t.status].dot} shrink-0`} />
+                    <span className="truncate">{t.title}</span>
+                  </div>
+                ))}
+                {dayTasks.length > 3 && <p className="text-[10px] text-3 pl-1.5">+{dayTasks.length - 3} de plus</p>}
+              </div>
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function WeekView({ range, tasksByDay, onOpenTask, today }) {
+  const days = []
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(range.from); d.setDate(d.getDate() + i)
+    days.push(d)
+  }
+  const isToday = d => today.getFullYear() === d.getFullYear() && today.getMonth() === d.getMonth() && today.getDate() === d.getDate()
+  return (
+    <div className="surface p-3">
+      <div className="grid grid-cols-7 gap-2">
+        {days.map(d => {
+          const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+          const dayTasks = tasksByDay[key] || []
+          const active = isToday(d)
+          return (
+            <div key={d.toISOString()} className={`rounded-xl p-3 min-h-[280px] border ${active ? 'border-white/40 bg-white/[0.03]' : 'border-[color:var(--w-border)]'}`}>
+              <div className="mb-2">
+                <p className="text-[10px] text-3 uppercase font-medium">{d.toLocaleDateString('fr-CH', { weekday: 'short' })}</p>
+                <p className={`text-lg font-bold ${active ? 'text-white' : ''}`}>{d.getDate()}</p>
+              </div>
+              <div className="space-y-1.5">
+                {dayTasks.map(t => (
+                  <button key={t.id} onClick={() => onOpenTask(t)}
+                    className="w-full text-left text-[11px] p-2 rounded-lg surface-flat hover:border-white/15 flex items-start gap-1.5">
+                    <span className={`dot ${STATUS[t.status].dot} mt-1 shrink-0`} />
+                    <span className="truncate">{t.title}</span>
+                  </button>
+                ))}
+                {dayTasks.length === 0 && <p className="text-[11px] text-3">—</p>}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function DayView({ day, tasks, onOpenTask, onCreate }) {
+  return (
+    <div className="surface p-6">
+      <div className="flex items-center justify-between mb-5">
+        <div>
+          <p className="text-[11px] text-3 uppercase mb-1">{day.toLocaleDateString('fr-CH', { weekday: 'long' })}</p>
+          <p className="text-3xl font-bold tracking-tight">{day.toLocaleDateString('fr-CH', { day: 'numeric', month: 'long' })}</p>
+        </div>
+        <button onClick={onCreate} className="h-9 px-3 rounded-full btn-primary text-[12.5px] inline-flex items-center gap-1">
+          <Plus className="w-3.5 h-3.5" /> Tâche
+        </button>
+      </div>
+      <div className="space-y-2">
+        {tasks.length === 0 && (
+          <div className="py-12 text-center">
+            <CalIcon className="w-6 h-6 mx-auto text-white/25 mb-2" />
+            <p className="text-sm text-2">Aucune tâche prévue ce jour.</p>
+          </div>
+        )}
+        {tasks.map(t => (
+          <button key={t.id} onClick={() => onOpenTask(t)}
+            className="w-full text-left surface-flat p-4 hover:border-white/15 transition flex items-center gap-3">
+            <span className={`dot ${STATUS[t.status].dot}`} />
+            <div className="flex-1 min-w-0">
+              <p className="font-medium text-[14px] truncate">{t.title}</p>
+              <p className="text-[11.5px] text-3 mt-0.5">{STATUS[t.status].label}</p>
+            </div>
+            <span className={`text-[10px] px-2 py-0.5 rounded-md border ${PRIORITY[t.priority]?.cls}`}>{PRIORITY[t.priority]?.label}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+
 const ROLES_META = [
   { key: 'owner',   label: 'Owner',   desc: 'Tous les droits · gestion complète du workspace' },
   { key: 'admin',   label: 'Admin',   desc: 'Peut tout gérer sauf suppression du workspace' },
@@ -1507,14 +1799,17 @@ function MemberEditDialog({ member, groups, onClose, onUpdate, onRemove, canMana
 function WelcomeSplash({ name, onDone }) {
   useEffect(() => {
     const reduce = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-    const t = setTimeout(onDone, reduce ? 300 : 1000)
+    const t = setTimeout(onDone, reduce ? 300 : 1400)
     return () => clearTimeout(t)
   }, [])
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-[color:var(--w-bg)] anim-splash-out">
-      <div className="flex flex-col items-center gap-5">
-        <WhatodoLogo size={48} stroke="#ffffff" className="opacity-90 anim-splash-logo" />
-        <p className="text-2xl font-semibold tracking-tight anim-splash-name">{name}</p>
+      <div className="flex flex-col items-center gap-6">
+        <WhatodoLogo size={44} stroke="#ffffff" className="opacity-90 anim-splash-logo" />
+        <div className="text-center">
+          <p className="text-[13px] text-2 anim-splash-hello">Bon retour parmi nous,</p>
+          <p className="text-3xl font-semibold tracking-tight mt-1.5 anim-splash-name">{name}</p>
+        </div>
       </div>
     </div>
   )
@@ -1887,7 +2182,7 @@ export default function App() {
     ...(canValidate ? [{ key: 'validation', label: 'Validation', icon: CheckCheck }] : []),
     ...(isAdmin ? [{ key: 'admin_groups', label: 'Tous groupes', icon: Shield }] : []),
     { key: 'members', label: 'Membres', icon: UserIcon },
-    { key: 'calendar', label: 'Calendrier', icon: CalIcon, soon: true },
+    { key: 'calendar', label: 'Calendrier', icon: CalIcon },
     { key: 'gantt', label: 'Gantt', icon: GanttChart, soon: true },
     { key: 'chat', label: 'Chat', icon: MessageSquare, soon: true },
     { key: 'notifs', label: 'Notifications', icon: Bell, soon: true },
@@ -1949,6 +2244,7 @@ export default function App() {
       case 'validation': return <ValidationView users={users} groups={groups} onOpenTask={openTask} refreshKey={refreshKey} />
       case 'admin_groups': return <AllGroupsView groups={groups} onOpenGroup={gid => { setViewGroupId(gid); setView('group') }} />
       case 'members': return <MembersView workspace={workspace} canManage={isAdmin} refreshKey={refreshKey} onRefresh={() => { loadWorkspaceData(); refresh() }} />
+      case 'calendar': return <CalendarView me={meCtx} users={users} onOpenTask={openTask} onCreate={() => setCreateOpen(true)} refreshKey={refreshKey} />
       default: return (
         <div className="anim-fade-up surface p-16 text-center">
           <p className="text-sm text-2">Cette section arrive bientôt.</p>
@@ -2021,7 +2317,7 @@ export default function App() {
       </main>
 
       <TaskDialog task={taskOpen} open={!!taskOpen} onClose={() => setTaskOpen(null)}
-        me={meCtx} users={users} groups={groups} onUpdated={taskUpdated} />
+        me={meCtx} users={users} groups={groups} onUpdated={taskUpdated} onDeleted={() => refresh()} />
       <CreateTaskDialog open={createOpen} onClose={() => setCreateOpen(false)}
         me={meCtx} groups={groups} onCreated={() => refresh()} />
       {invitePanelOpen && (

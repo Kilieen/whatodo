@@ -285,7 +285,7 @@ async function handleRoute(request, { params }) {
       if (!g) return err('Groupe introuvable', 404)
       const users = await db.collection('users').find({ id: { $in: g.memberIds || [] } }).toArray()
       const leader = users.find(u => u.id === g.leaderId)
-      const tasks = await db.collection('tasks').find({ groupId, workspaceId: workspace.id }).toArray()
+      const tasks = await db.collection('tasks').find({ groupId, workspaceId: workspace.id, deletedAt: { $exists: false } }).toArray()
       const { _id, ...rest } = g
       return json({
         ...rest, leader: strip(leader),
@@ -298,7 +298,14 @@ async function handleRoute(request, { params }) {
     if (route === '/tasks' && method === 'GET') {
       const url = new URL(request.url)
       const scope = url.searchParams.get('scope') || 'visible'
+      const trash = url.searchParams.get('trash') === '1'
       let query = { workspaceId: workspace.id }
+      if (trash) {
+        if (!['owner','admin'].includes(member.role)) return err('Non autorisé', 403)
+        query.deletedAt = { $exists: true }
+      } else {
+        query.deletedAt = { $exists: false }
+      }
       const priv = ['owner','admin','teacher'].includes(member.role)
       if (priv) {
         if (scope === 'mine') query.assignees = user.id
@@ -376,9 +383,29 @@ async function handleRoute(request, { params }) {
         return json(strip(updated))
       }
       if (!sub && method === 'DELETE') {
-        if (!canManage) return err('Non autorisé', 403)
-        await db.collection('tasks').deleteOne({ id: taskId })
-        return json({ ok: true })
+        // Permissions:
+        // owner/admin → any task
+        // leader of task's group → any task in that group
+        // member → only own tasks (created by them)
+        const isPriv = ['owner','admin'].includes(member.role)
+        const isLeaderOfGroup = member.role === 'leader' && group?.leaderId === user.id
+        const isCreator = task.createdBy === user.id
+        if (!isPriv && !isLeaderOfGroup && !isCreator) return err('Non autorisé', 403)
+        // Soft delete
+        const history = task.history || []
+        history.push({ userId: user.id, action: 'deleted', at: new Date() })
+        await db.collection('tasks').updateOne({ id: taskId }, {
+          $set: { deletedAt: new Date(), deletedBy: user.id, history, updatedAt: new Date() }
+        })
+        return json({ ok: true, softDeleted: true })
+      }
+      if (sub === 'restore' && method === 'POST') {
+        const isPriv = ['owner','admin'].includes(member.role)
+        if (!isPriv) return err('Non autorisé', 403)
+        await db.collection('tasks').updateOne({ id: taskId }, {
+          $set: { updatedAt: new Date() }, $unset: { deletedAt: '', deletedBy: '' }
+        })
+        return json({ ok: true, restored: true })
       }
       if (sub === 'comments' && method === 'POST') {
         if (!canViewTask({ ...member, userId: user.id }, task)) return err('Non autorisé', 403)
@@ -425,8 +452,8 @@ async function handleRoute(request, { params }) {
     // ============ DASHBOARD ============
     if (route === '/dashboard' && method === 'GET') {
       const now = new Date()
-      const myTasks = await db.collection('tasks').find({ assignees: user.id, workspaceId: workspace.id }).toArray()
-      const groupTasks = member.groupId ? await db.collection('tasks').find({ groupId: member.groupId, workspaceId: workspace.id }).toArray() : []
+      const myTasks = await db.collection('tasks').find({ assignees: user.id, workspaceId: workspace.id, deletedAt: { $exists: false } }).toArray()
+      const groupTasks = member.groupId ? await db.collection('tasks').find({ groupId: member.groupId, workspaceId: workspace.id, deletedAt: { $exists: false } }).toArray() : []
       const countBy = (arr, s) => arr.filter(t => t.status === s).length
       const overdue = myTasks.filter(t => t.status !== 'done' && new Date(t.dueDate) < now).length
       const upcoming = [...myTasks].filter(t => t.status !== 'done').sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate)).slice(0, 8)
@@ -459,9 +486,26 @@ async function handleRoute(request, { params }) {
       })
     }
 
+    // ============ CALENDAR ============
+    if (route === '/calendar' && method === 'GET') {
+      const url = new URL(request.url)
+      const from = url.searchParams.get('from')
+      const to = url.searchParams.get('to')
+      const scope = url.searchParams.get('scope') || 'group'
+      let query = { workspaceId: workspace.id, deletedAt: { $exists: false } }
+      if (from && to) query.dueDate = { $gte: new Date(from), $lte: new Date(to) }
+      const priv = ['owner','admin','teacher'].includes(member.role)
+      if (scope === 'mine') query.assignees = user.id
+      else if (scope === 'group' && member.groupId && !priv) query.groupId = member.groupId
+      else if (!priv && scope !== 'mine') query.$or = [{ groupId: member.groupId }, { assignees: user.id }]
+      // 'all' left as-is for privileged
+      const tasks = await db.collection('tasks').find(query).toArray()
+      return json(cleanArr(tasks))
+    }
+
     // ============ VALIDATION QUEUE ============
     if (route === '/validation-queue' && method === 'GET') {
-      let query = { status: 'review', workspaceId: workspace.id }
+      let query = { status: 'review', workspaceId: workspace.id, deletedAt: { $exists: false } }
       if (member.role === 'leader') {
         const grp = await db.collection('groups').findOne({ leaderId: user.id, workspaceId: workspace.id })
         if (!grp) return json([])

@@ -223,11 +223,12 @@
     0%, 75% { opacity: 1; }
     100%    { opacity: 0; }
   }
-  .anim-splash-logo { animation: splashLogoIn 350ms cubic-bezier(0.22,1,0.36,1) both; }
-  .anim-splash-name { animation: splashNameIn 350ms cubic-bezier(0.22,1,0.36,1) 180ms both; }
-  .anim-splash-out  { animation: splashOut 1000ms ease-out both; }
+  .anim-splash-logo  { animation: splashLogoIn 350ms cubic-bezier(0.22,1,0.36,1) both; }
+  .anim-splash-hello { animation: splashNameIn 300ms cubic-bezier(0.22,1,0.36,1) 260ms both; }
+  .anim-splash-name  { animation: splashNameIn 350ms cubic-bezier(0.22,1,0.36,1) 380ms both; }
+  .anim-splash-out   { animation: splashOut 1400ms ease-out both; }
   @media (prefers-reduced-motion: reduce) {
-    .anim-splash-logo, .anim-splash-name, .anim-splash-out { animation: none; }
+    .anim-splash-logo, .anim-splash-hello, .anim-splash-name, .anim-splash-out { animation: none; }
   }
 
   /* Kanban mobile scroll */
