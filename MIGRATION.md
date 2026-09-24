@@ -1,3 +1,5 @@
+> Document historique. La cible actuelle est Render + MongoDB Atlas ; voir [RENDER.md](./RENDER.md). Les affirmations et plans ci-dessous ne constituent pas une validation de la version actuelle.
+
 # Migrating Whatodo from Emergent to GitHub + Supabase + Vercel
 
 This guide walks you through moving Whatodo from the current Emergent-hosted MongoDB stack to a self-owned stack: **GitHub** for source control, **Supabase** (Postgres + Auth + Storage + Realtime) for backend, and **Vercel** for hosting.

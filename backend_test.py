@@ -5,13 +5,14 @@ Tests all endpoints with fresh user registration (NO seed data).
 Follows the exact test scenario from Phases A-G.
 """
 
+import os
 import requests
 import json
 import sys
 from datetime import datetime, timedelta
 
 # Base URL
-BASE_URL = "https://projet-epco.preview.emergentagent.com/api"
+BASE_URL = os.environ.get("WHATODO_TEST_BASE_URL", "http://127.0.0.1:3000/api")
 
 # Global state
 state = {

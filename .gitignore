@@ -54,3 +54,6 @@ credentials.json
 *.pem
 *.key
 .credentials
+
+# Safe template (no secrets)
+!.env.example

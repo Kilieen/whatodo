@@ -16,8 +16,9 @@ const { MongoClient } = require('mongodb')
 
 async function main() {
   const uri = process.env.MONGO_URL
-  const dbName = process.env.DB_NAME || 'epco_hub'
+  const dbName = process.env.DB_NAME
   if (!uri) { console.error('MONGO_URL missing'); process.exit(1) }
+  if (!uri || !dbName) throw new Error('MONGO_URL and DB_NAME must be configured')
   const client = new MongoClient(uri)
   await client.connect()
   const db = client.db(dbName)

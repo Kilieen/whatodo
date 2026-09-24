@@ -28,7 +28,8 @@ async function main() {
   if (r.status !== 0) { console.error('Backup failed, aborting wipe.'); process.exit(1) }
 
   const uri = process.env.MONGO_URL
-  const dbName = process.env.DB_NAME || 'epco_hub'
+  const dbName = process.env.DB_NAME
+  if (!uri || !dbName) throw new Error('MONGO_URL and DB_NAME must be configured')
   const client = new MongoClient(uri)
   await client.connect()
   const db = client.db(dbName)
