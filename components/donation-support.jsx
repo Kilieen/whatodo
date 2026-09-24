@@ -1,11 +1,20 @@
 'use client'
 
 import { useEffect, useId, useRef, useState } from 'react'
+import { apiFetch, getWorkspaceId } from '@/lib/api-client'
 import { Copy, Heart } from 'lucide-react'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { DONATION_CONFIG, amountInCents, displayPhone, formatDonation, validateDonation } from '@/lib/donations'
 
-function DonationFlow() {
+function DonationFlow({ onClose, onBusy }) {
+  const [workspaceId] = useState(getWorkspaceId)
+  const requestId = useRef(null)
+  const sending = useRef(false)
+  const [loading, setLoading] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [submitError, setSubmitError] = useState('')
+  const successRef = useRef(null)
+  useEffect(() => { if (saved) successRef.current?.focus() }, [saved])
   const prefix = useId()
   const [form, setForm] = useState({ firstName: '', lastName: '', amount: '5' })
   const [custom, setCustom] = useState(false)
@@ -59,6 +68,30 @@ function DonationFlow() {
     }
   }
 
+  async function declareDonation() {
+    if (sending.current) return
+    sending.current = true
+    setLoading(true); onBusy(true); setSubmitError('')
+    try {
+      requestId.current ||= crypto.randomUUID()
+      await apiFetch('/donations', { method: 'POST', headers: { 'X-Workspace-Id': workspaceId || '' }, body: JSON.stringify({
+        firstName: form.firstName.trim(), lastName: form.lastName.trim(),
+        amount: form.amount, currency: 'CHF', requestId: requestId.current,
+      }) })
+      setSaved(true)
+    } catch (error) { setSubmitError(error.message) }
+    finally { sending.current = false; setLoading(false); onBusy(false) }
+  }
+
+  if (saved) return <>
+    <DialogHeader>
+      <DialogTitle ref={successRef} tabIndex={-1}>Merci pour ton soutien ❤️</DialogTitle>
+      <DialogDescription>Ta déclaration de don a bien été enregistrée.</DialogDescription>
+    </DialogHeader>
+    <p className="text-sm text-2">Don déclaré comme effectué. Whatodo ne vérifie pas le paiement TWINT.</p>
+    <button type="button" onClick={onClose} className="btn-primary min-h-11 rounded-xl px-4 py-2 text-sm">Fermer</button>
+  </>
+
   return <>
     <DialogHeader className="text-left pr-6">
       <DialogTitle className="text-xl">Soutenir Whatodo ❤️</DialogTitle>
@@ -100,7 +133,7 @@ function DonationFlow() {
         {errors.amount && <p id={`${prefix}-amount-error`} role="alert" className="text-xs text-red-300">{errors.amount}</p>}
       </fieldset>
       {cents !== null && <p aria-live="polite" className="text-sm text-2">Tu souhaites contribuer <span className="text-white font-semibold">{formatDonation(cents)}</span> à Whatodo.</p>}
-      <p className="text-xs text-3">Tes prénom et nom identifient uniquement ce récapitulatif. Ces informations restent dans cette fenêtre et sont effacées à sa fermeture.</p>
+      <p className="text-xs text-3">Tes prénom, nom et montant seront enregistrés avec ton compte et cet espace uniquement si tu cliques sur « J’ai fait le don ». Les owner/admin de cet espace recevront une notification.</p>
       <button type="submit" className="btn-primary w-full min-h-11 rounded-xl px-4 py-2 text-sm">Continuer avec TWINT</button>
     </form> : <div className="space-y-4">
       <div ref={summaryRef} tabIndex={-1} className="surface-flat rounded-xl p-4 space-y-2 outline-none">
@@ -117,9 +150,15 @@ function DonationFlow() {
         <p role="status" className="text-xs text-2">{copyMessage}</p>
       </div>
       <p className="text-xs text-2">Vérifie le destinataire et le montant dans TWINT avant de confirmer. Whatodo ne peut ni ouvrir automatiquement ton app ni confirmer le paiement.</p>
-      <p className="text-sm text-2">Merci pour ton soutien ❤️<br />Le paiement est effectué directement dans TWINT.</p>
+      <p className="text-sm text-2">Une fois ton paiement effectué dans TWINT, reviens ici et clique sur ‘J’ai fait le don’.</p>
+      <p className="text-xs text-3">Il s’agit de ta déclaration, pas d’une vérification du paiement par Whatodo.</p>
+      {submitError && <p role="alert" className="text-sm text-red-300">{submitError} Tu peux réessayer : la même déclaration sera réutilisée.</p>}
+      <div className="flex flex-wrap gap-2" aria-busy={loading}>
+        <button type="button" disabled={loading} onClick={declareDonation} className="btn-primary flex-1 min-h-11 rounded-xl px-4 py-2 text-sm disabled:opacity-50">{loading ? 'Enregistrement…' : 'J’ai fait le don'}</button>
+        <button type="button" disabled={loading} onClick={onClose} className="btn-ghost min-h-11 rounded-xl px-4 py-2 text-sm disabled:opacity-50">Abandonner</button>
+      </div>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <button type="button" onClick={() => { setInstructions(false); setCopyMessage('') }} className="btn-ghost rounded-xl px-3 py-2 text-sm">Modifier</button>
+        <button type="button" disabled={loading || !!requestId.current} onClick={() => { setInstructions(false); setCopyMessage('') }} className="btn-ghost rounded-xl px-3 py-2 text-sm">Modifier</button>
         <a href={DONATION_CONFIG.instructionsUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-2 underline underline-offset-4 hover:text-white">Guide officiel TWINT<span className="sr-only"> (nouvel onglet)</span></a>
       </div>
     </div>}
@@ -128,7 +167,8 @@ function DonationFlow() {
 
 export function DonationSupport() {
   const [open, setOpen] = useState(false)
-  return <Dialog open={open} onOpenChange={setOpen}>
+  const [busy, setBusy] = useState(false)
+  return <Dialog open={open} onOpenChange={value => { if (!busy) setOpen(value) }}>
     <DialogTrigger asChild>
       <button type="button" className="nav-item w-full mb-2 text-2">
         <Heart aria-hidden="true" className="w-4 h-4 shrink-0" />
@@ -136,7 +176,7 @@ export function DonationSupport() {
       </button>
     </DialogTrigger>
     <DialogContent className="w-glass w-[calc(100%_-_2rem)] max-w-lg max-h-[90dvh] overflow-y-auto rounded-2xl border-white/10 p-5 sm:p-6">
-      {open && <DonationFlow />}
+      {open && <DonationFlow onClose={() => setOpen(false)} onBusy={setBusy} />}
     </DialogContent>
   </Dialog>
 }

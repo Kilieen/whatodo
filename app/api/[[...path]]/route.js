@@ -1,3 +1,4 @@
+import { validateDonation, formatDonation } from '@/lib/donations'
 import { NextResponse } from 'next/server'
 import { v4 as uuidv4 } from 'uuid'
 import { getDb } from '@/lib/mongo'
@@ -255,6 +256,7 @@ async function handleRoute(request, { params }) {
       await db.collection('groups').updateMany({}, { $pull: { memberIds: user.id } })
       await db.collection('groups').updateMany({ leaderId: user.id }, { $set: { leaderId: null } })
       await db.collection('notifications').deleteMany({ userId: user.id })
+      await db.collection('donations').deleteMany({ userId: user.id })
       await db.collection('users').deleteOne({ id: user.id })
       await audit(db, { workspaceId: null, actorId: user.id, action: 'account_deleted' })
       return json({ ok: true })
@@ -399,8 +401,43 @@ async function handleRoute(request, { params }) {
     const { workspace, member } = ws
     const mutating = !['GET', 'HEAD'].includes(method)
     if (mutating && workspace.archivedAt && !['/workspace/unarchive', '/workspace/leave'].includes(route)) return err('Cet espace est archivé : lecture seule', 403)
-    if (mutating && member.role === 'viewer' && !['/workspace/leave', '/notifications/mark-read'].includes(route)) return err('Accès en lecture seule', 403)
+    if (mutating && member.role === 'viewer' && !['/workspace/leave', '/notifications/mark-read', '/donations'].includes(route)) return err('Accès en lecture seule', 403)
 
+
+    // User declaration only: no TWINT verification or payment processing.
+    if (route === '/donations' && method === 'POST') {
+      const body = await readBody()
+      const amount = typeof body.amount === 'number' ? String(body.amount) : body.amount
+      const result = validateDonation({ ...body, amount })
+      if (Object.keys(result.errors).length) return err(Object.values(result.errors)[0], 400)
+      if (body.currency !== 'CHF') return err('Devise CHF requise', 400)
+      if (typeof body.requestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.requestId)) return err('Identifiant de déclaration invalide', 400)
+      // The built-in unique _id index makes concurrent retries atomic, across instances.
+      const key = `${workspace.id}:${user.id}:${body.requestId}`
+      const proposed = {
+        _id: key, id: uuidv4(), workspaceId: workspace.id, userId: user.id,
+        firstName: body.firstName.trim(), lastName: body.lastName.trim(),
+        amount: result.cents / 100, currency: 'CHF', status: 'declared_paid', createdAt: new Date(),
+      }
+      try { await db.collection('donations').insertOne(proposed) }
+      catch (error) { if (error.code !== 11000) throw error }
+      const donation = await db.collection('donations').findOne({ _id: key })
+      if (['firstName', 'lastName', 'amount'].some(field => donation[field] !== proposed[field])) return err('Cette déclaration a déjà été utilisée avec un autre montant ou nom.', 409)
+      const recipients = await db.collection('workspace_members').find({ workspaceId: workspace.id, status: 'active', role: { $in: ['owner', 'admin'] } }).toArray()
+      for (const recipient of recipients) {
+        const notificationId = `donation:${donation.id}:${recipient.userId}`
+        // Idempotent notification writes also repair a partially failed request on retry.
+        try {
+          await db.collection('notifications').updateOne({ _id: notificationId }, { $setOnInsert: {
+            id: notificationId, workspaceId: workspace.id, userId: recipient.userId,
+            type: 'donation_declared', title: 'Nouveau don déclaré ❤️',
+            body: `${donation.firstName} ${donation.lastName} indique avoir effectué un don de ${formatDonation(result.cents)} pour soutenir Whatodo.`,
+            link: { view: 'notifs' }, read: false, createdAt: donation.createdAt,
+          } }, { upsert: true })
+        } catch (error) { if (error.code !== 11000) throw error }
+      }
+      return json({ id: donation.id, status: donation.status })
+    }
 
     // ============ WORKSPACE DETAILS / MEMBERS ============
     if (route === '/workspace' && method === 'GET') {
@@ -978,7 +1015,7 @@ async function handleRoute(request, { params }) {
     // ============ NOTIFICATIONS ============
     if (route === '/notifications' && method === 'GET') {
       const notifs = await db.collection('notifications')
-        .find({ userId: user.id, workspaceId: workspace.id })
+        .find({ userId: user.id, workspaceId: workspace.id, ...(!['owner', 'admin'].includes(member.role) ? { type: { $ne: 'donation_declared' } } : {}) })
         .sort({ createdAt: -1 }).limit(50).toArray()
       return json(cleanArr(notifs))
     }
@@ -1134,6 +1171,7 @@ async function handleRoute(request, { params }) {
       await db.collection('channels').deleteMany({ workspaceId: workspace.id })
       await db.collection('messages').deleteMany({ workspaceId: workspace.id })
       await db.collection('notifications').deleteMany({ workspaceId: workspace.id })
+      await db.collection('donations').deleteMany({ workspaceId: workspace.id })
       await db.collection('invitations').deleteMany({ workspaceId: workspace.id })
       await db.collection('workspaces').deleteOne({ id: workspace.id })
       return json({ ok: true, deleted: true })
