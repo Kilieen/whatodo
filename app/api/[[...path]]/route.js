@@ -3,9 +3,10 @@ import { v4 as uuidv4 } from 'uuid'
 import { getDb } from '@/lib/mongo'
 import { signToken, comparePassword, hashPassword,
   requireUser, requireWorkspace,
-  canManageWorkspace, canManageGroupTasks, canViewTask,
+  canManageWorkspace, canManageGroupTasks, canViewTask, canViewGroup, canReadChannel,
   rateLimit, getClientIp, validateDataUrl, UPLOAD_LIMITS
 } from '@/lib/authz'
+import { invalid, text, id, ids, date, workspaceGroup, workspaceUsers, taskInput, syncGroups } from '@/lib/validation'
 import { makeInviteCode, ensureDefaultChannels, audit } from '@/lib/seed'
 
 // CORS: scope to known origins in production, permissive in dev/preview.
@@ -47,15 +48,40 @@ async function handleRoute(request, { params }) {
   const { path = [] } = await params
   const route = '/' + path.join('/')
   const method = request.method
-  const db = await getDb()
-
   try {
+    const db = await getDb()
+    // Reject oversized/malformed JSON before any mutations. Keep file uploads bounded.
+    let parsedBody
+    if (!['GET', 'HEAD'].includes(method)) {
+      const reader = request.body?.getReader()
+      const chunks = []; let size = 0
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          size += value.byteLength
+          if (size > 3 * 1024 * 1024) { await reader.cancel(); return err('Requête trop volumineuse', 413, request) }
+          chunks.push(Buffer.from(value))
+        }
+      }
+      try { parsedBody = size ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {} } catch { return err('JSON invalide', 400, request) }
+      if (!parsedBody || typeof parsedBody !== 'object' || Array.isArray(parsedBody)) return err('Objet JSON requis', 400, request)
+      for (const [key, value] of Object.entries(parsedBody)) {
+        if (['email', 'firstName', 'lastName', 'displayName', 'name', 'title', 'description', 'content', 'bio', 'password', 'currentPassword', 'newPassword', 'token', 'inviteCode', 'timezone', 'locale', 'theme', 'avatarColor', 'color', 'emoji', 'icon', 'comment', 'fileName', 'mimeType', 'type', 'text', 'linkUrl'].includes(key)) {
+          text(value, key, ['description', 'content', 'text'].includes(key) ? 10000 : ['password', 'currentPassword', 'newPassword'].includes(key) ? 72 : 300)
+        }
+        if (['groupId', 'leaderId', 'targetUserId', 'replyToId', 'id'].includes(key) && value !== null && value !== '') id(value, key)
+        if (['memberIds', 'assignees'].includes(key)) ids(value, key)
+      }
+    }
+    const readBody = async () => parsedBody
+
     // ============ AUTH ============
     if (route === '/auth/login' && method === 'POST') {
       const ip = getClientIp(request)
       const rl = rateLimit(`login:${ip}`, { max: 10, windowMs: 60_000 })
       if (!rl.ok) return err(`Trop de tentatives. Réessayez dans ${rl.retryAfterSec}s.`, 429, request)
-      const body = await request.json()
+      const body = await readBody()
       const user = await db.collection('users').findOne({ email: (body.email || '').toLowerCase().trim() })
       if (!user) return err('Identifiants invalides', 401, request)
       const ok = await comparePassword(body.password || '', user.passwordHash)
@@ -68,7 +94,7 @@ async function handleRoute(request, { params }) {
       const ip = getClientIp(request)
       const rl = rateLimit(`register:${ip}`, { max: 5, windowMs: 60_000 })
       if (!rl.ok) return err(`Trop de tentatives. Réessayez dans ${rl.retryAfterSec}s.`, 429, request)
-      const body = await request.json()
+      const body = await readBody()
       const email = (body.email || '').toLowerCase().trim()
       if (!email || !body.password || !body.firstName) return err('Champs requis manquants', 400, request)
       if ((body.password || '').length < 8) return err('Le mot de passe doit contenir au moins 8 caractères', 400, request)
@@ -119,7 +145,7 @@ async function handleRoute(request, { params }) {
     if (route === '/auth/me' && method === 'PATCH') {
       const user = await requireUser(request, db)
       if (!user) return err('Non authentifié', 401, request)
-      const body = await request.json()
+      const body = await readBody()
       const allowed = {}
       const fields = ['firstName', 'lastName', 'avatarColor', 'timezone', 'locale', 'theme', 'notifPrefs', 'tutorialSeen', 'bio', 'displayName']
       for (const f of fields) if (f in body) allowed[f] = body[f]
@@ -147,7 +173,7 @@ async function handleRoute(request, { params }) {
     if (route === '/auth/change-password' && method === 'POST') {
       const user = await requireUser(request, db)
       if (!user) return err('Non authentifié', 401, request)
-      const body = await request.json()
+      const body = await readBody()
       if (!body.currentPassword || !body.newPassword) return err('Champs requis', 400, request)
       if (body.newPassword.length < 8) return err('Nouveau mot de passe trop court (min. 8 caractères)', 400, request)
       const full = await db.collection('users').findOne({ id: user.id })
@@ -165,7 +191,7 @@ async function handleRoute(request, { params }) {
       const ip = getClientIp(request)
       const rl = rateLimit(`forgot:${ip}`, { max: 5, windowMs: 60_000 })
       if (!rl.ok) return err(`Trop de tentatives. Réessayez dans ${rl.retryAfterSec}s.`, 429, request)
-      const body = await request.json().catch(() => ({}))
+      const body = await readBody().catch(() => ({}))
       const email = (body.email || '').toLowerCase().trim()
       if (!email) return err('Email requis', 400, request)
       const user = await db.collection('users').findOne({ email })
@@ -176,12 +202,12 @@ async function handleRoute(request, { params }) {
           expiresAt: new Date(Date.now() + 60 * 60 * 1000),
           used: false, createdAt: new Date(),
         })
-        // Email delivery is deferred to Supabase Auth (see MIGRATION.md).
-        console.log(`[password-reset] token for ${email}: ${token}`)
+        // Delivery requires a configured email provider; do not claim a message was sent.
+        // Never log a reset token. Email delivery is not configured yet.
       }
       return json({
         ok: true,
-        message: "Si un compte existe pour cet email, un lien de r\u00e9initialisation sera envoy\u00e9 (activ\u00e9 apr\u00e8s la migration Supabase)."
+        message: "La récupération par email n’est pas encore configurée. Contactez l’administrateur."
       }, 200, request)
     }
 
@@ -189,7 +215,7 @@ async function handleRoute(request, { params }) {
       const ip = getClientIp(request)
       const rl = rateLimit(`reset:${ip}`, { max: 10, windowMs: 60_000 })
       if (!rl.ok) return err(`Trop de tentatives. Réessayez dans ${rl.retryAfterSec}s.`, 429, request)
-      const body = await request.json().catch(() => ({}))
+      const body = await readBody().catch(() => ({}))
       const token = (body.token || '').trim()
       const newPassword = body.newPassword || ''
       if (!token || !newPassword) return err('Token et mot de passe requis', 400, request)
@@ -205,13 +231,13 @@ async function handleRoute(request, { params }) {
       const nextPv = (full.passwordVersion || 0) + 1
       await db.collection('users').updateOne({ id: rec.userId }, { $set: { passwordHash, passwordVersion: nextPv, updatedAt: new Date() } })
       await db.collection('password_resets').updateOne({ id: rec.id }, { $set: { used: true, usedAt: new Date() } })
-      return json({ ok: true }, 200, request)
+      return json({ ok: true, token: signToken({ uid: rec.userId, pv: nextPv }) }, 200, request)
     }
 
     if (route === '/auth/delete-account' && method === 'POST') {
       const user = await requireUser(request, db)
       if (!user) return err('Non authentifié', 401)
-      const body = await request.json().catch(() => ({}))
+      const body = await readBody().catch(() => ({}))
       const full = await db.collection('users').findOne({ id: user.id })
       const ok = await comparePassword(body.password || '', full.passwordHash)
       if (!ok) return err('Mot de passe incorrect', 401)
@@ -227,6 +253,7 @@ async function handleRoute(request, { params }) {
       // Remove membership everywhere; keep tasks/messages but anonymize
       await db.collection('workspace_members').deleteMany({ userId: user.id })
       await db.collection('groups').updateMany({}, { $pull: { memberIds: user.id } })
+      await db.collection('groups').updateMany({ leaderId: user.id }, { $set: { leaderId: null } })
       await db.collection('notifications').deleteMany({ userId: user.id })
       await db.collection('users').deleteOne({ id: user.id })
       await audit(db, { workspaceId: null, actorId: user.id, action: 'account_deleted' })
@@ -253,8 +280,22 @@ async function handleRoute(request, { params }) {
     if (route === '/workspaces' && method === 'POST') {
       const user = await requireUser(request, db)
       if (!user) return err('Non authentifié', 401)
-      const body = await request.json()
-      if (!body.name) return err('Nom requis', 400)
+      const body = await readBody()
+      text(body.name, 'Nom', 60, true)
+      if (body.groups !== undefined) {
+        if (!Array.isArray(body.groups) || body.groups.length > 50) invalid('Liste de groupes invalide')
+        for (const group of body.groups) {
+          if (!group || typeof group !== 'object') invalid('Groupe invalide')
+          text(group.name, 'Nom du groupe', 60, true)
+          if (group.description !== undefined) text(group.description, 'Description', 300)
+        }
+      }
+      if (body.firstTask !== undefined) {
+        if (!body.firstTask || typeof body.firstTask !== 'object' || Array.isArray(body.firstTask)) invalid('Première tâche invalide')
+        text(body.firstTask.title, 'Titre', 160, true)
+        if (body.firstTask.description !== undefined) text(body.firstTask.description, 'Description', 10000)
+        if (body.firstTask.priority && !['low', 'medium', 'high', 'urgent'].includes(body.firstTask.priority)) invalid('Priorité invalide')
+      }
       if (body.logo) {
         const v = validateDataUrl(body.logo, UPLOAD_LIMITS.workspaceLogo)
         if (!v.ok) return err(v.error, 400)
@@ -278,8 +319,7 @@ async function handleRoute(request, { params }) {
         id: uuidv4(), workspaceId: wid, userId: user.id,
         role: 'owner', groupId: null, status: 'active', joinedAt: new Date(),
       })
-      // Create default channels (#general, #chefs)
-      await ensureDefaultChannels(db, wid, [])
+      // Default channels are created once the onboarding groups exist.
       // Optional: create groups on the fly
       if (Array.isArray(body.groups)) {
         for (const g of body.groups) {
@@ -291,6 +331,7 @@ async function handleRoute(request, { params }) {
           })
         }
       }
+      await ensureDefaultChannels(db, wid, await db.collection('groups').find({ workspaceId: wid }).toArray())
       // Optional: create first task
       if (body.firstTask?.title) {
         await db.collection('tasks').insertOne({
@@ -311,7 +352,7 @@ async function handleRoute(request, { params }) {
     if (route === '/workspaces/join' && method === 'POST') {
       const user = await requireUser(request, db)
       if (!user) return err('Non authentifié', 401)
-      const body = await request.json()
+      const body = await readBody()
       const code = (body.inviteCode || body.token || '').trim().toUpperCase()
       if (!code) return err('Code requis', 400)
       // Try workspace inviteCode first, then a per-invitation token
@@ -330,10 +371,12 @@ async function handleRoute(request, { params }) {
       const existing = await db.collection('workspace_members').findOne({ workspaceId: workspace.id, userId: user.id })
       if (existing) {
         if (existing.status !== 'active') {
-          await db.collection('workspace_members').updateOne({ id: existing.id }, { $set: { status: 'active' } })
+          return err('Votre accès a été désactivé. Contactez un administrateur.', 403)
         }
         return json({ workspace: strip(workspace), rejoined: true })
       }
+      if (invitation?.email && invitation.email !== user.email) return err('Invitation réservée à un autre email', 403)
+      if (invitation?.groupId) await workspaceGroup(db, workspace.id, invitation.groupId)
       const role = invitation?.role || 'member'
       const groupId = invitation?.groupId || null
       await db.collection('workspace_members').insertOne({
@@ -343,6 +386,7 @@ async function handleRoute(request, { params }) {
       if (invitation) {
         await db.collection('invitations').updateOne({ id: invitation.id }, { $inc: { uses: 1 } })
       }
+      await syncGroups(db, workspace.id)
       await audit(db, { workspaceId: workspace.id, actorId: user.id, action: 'member_joined', meta: { via: invitation ? 'invitation' : 'code' } })
       return json({ workspace: strip(workspace), joined: true })
     }
@@ -353,6 +397,10 @@ async function handleRoute(request, { params }) {
     const ws = await requireWorkspace(request, db, user)
     if (!ws) return err('Workspace inaccessible', 403)
     const { workspace, member } = ws
+    const mutating = !['GET', 'HEAD'].includes(method)
+    if (mutating && workspace.archivedAt && !['/workspace/unarchive', '/workspace/leave'].includes(route)) return err('Cet espace est archivé : lecture seule', 403)
+    if (mutating && member.role === 'viewer' && !['/workspace/leave', '/notifications/mark-read'].includes(route)) return err('Accès en lecture seule', 403)
+
 
     // ============ WORKSPACE DETAILS / MEMBERS ============
     if (route === '/workspace' && method === 'GET') {
@@ -395,7 +443,11 @@ async function handleRoute(request, { params }) {
       const memberId = memMatch[1]
       const target = await db.collection('workspace_members').findOne({ id: memberId, workspaceId: workspace.id })
       if (!target) return err('Membre introuvable', 404)
-      const body = await request.json()
+      const body = await readBody()
+      if (target.role === 'owner' && member.role !== 'owner') return err('Seul un owner peut gérer un owner', 403)
+      if (target.role === 'owner' && body.status === 'inactive') return err('Transférez ou retirez le rôle owner avant de désactiver ce membre', 400)
+      if ('role' in body && !['owner','admin','leader','member','teacher','viewer'].includes(body.role)) invalid('Rôle invalide')
+      if ('status' in body && !['active','inactive'].includes(body.status)) invalid('Statut de membre invalide')
       // SEC-002: never allow anyone but an existing owner to grant/revoke the `owner` role,
       // and forbid self-role modifications (an admin cannot promote themselves).
       if ('role' in body) {
@@ -426,18 +478,10 @@ async function handleRoute(request, { params }) {
       }
       if ('status' in body && ['active','inactive'].includes(body.status)) update.status = body.status
       await db.collection('workspace_members').updateOne({ id: memberId }, { $set: update })
-      // If groupId changed, also sync legacy groups.memberIds and leaderId if role becomes leader
-      if ('groupId' in update) {
-        // remove from all groups memberIds in this workspace, then add to new
-        await db.collection('groups').updateMany({ workspaceId: workspace.id, memberIds: target.userId }, { $pull: { memberIds: target.userId } })
-        if (update.groupId) {
-          await db.collection('groups').updateOne({ id: update.groupId }, { $addToSet: { memberIds: target.userId } })
-        }
+      if (update.role === 'leader' && (update.groupId ?? target.groupId) && update.status !== 'inactive') {
+        await db.collection('groups').updateOne({ id: update.groupId ?? target.groupId, workspaceId: workspace.id }, { $set: { leaderId: target.userId } })
       }
-      if (update.role === 'leader' && (update.groupId || target.groupId)) {
-        const gid = update.groupId || target.groupId
-        await db.collection('groups').updateOne({ id: gid }, { $set: { leaderId: target.userId } })
-      }
+      await syncGroups(db, workspace.id)
       return json({ ok: true })
     }
     if (memMatch && method === 'DELETE') {
@@ -445,12 +489,13 @@ async function handleRoute(request, { params }) {
       const memberId = memMatch[1]
       const target = await db.collection('workspace_members').findOne({ id: memberId, workspaceId: workspace.id })
       if (!target) return err('Membre introuvable', 404)
+      if (target.role === 'owner' && member.role !== 'owner') return err('Seul un owner peut retirer un owner', 403)
       if (target.role === 'owner') {
         const owners = await db.collection('workspace_members').countDocuments({ workspaceId: workspace.id, role: 'owner', status: 'active' })
         if (owners <= 1) return err('Impossible de retirer le dernier owner', 400)
       }
       await db.collection('workspace_members').deleteOne({ id: memberId })
-      await db.collection('groups').updateMany({ workspaceId: workspace.id }, { $pull: { memberIds: target.userId } })
+      await syncGroups(db, workspace.id)
       return json({ ok: true })
     }
 
@@ -480,31 +525,54 @@ async function handleRoute(request, { params }) {
       }))
     }
 
-    if (route === '/groups' && method === 'POST') {
+    const groupMatch = route.match(/^\/groups\/([^/]+)$/)
+    if ((route === '/groups' && method === 'POST') || (groupMatch && method === 'PATCH')) {
       if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
-      const body = await request.json()
-      const group = {
-        id: uuidv4(), workspaceId: workspace.id, name: body.name || 'Nouveau groupe',
-        leaderId: body.leaderId || null, memberIds: body.memberIds || [],
-        description: body.description || '', createdAt: new Date(),
+      const body = await readBody()
+      const old = groupMatch ? await db.collection('groups').findOne({ id: groupMatch[1], workspaceId: workspace.id }) : null
+      if (groupMatch && !old) return err('Groupe introuvable', 404)
+      const name = text(body.name ?? old?.name, 'Nom du groupe', 60, true)
+      const description = text(body.description ?? old?.description ?? '', 'Description', 300)
+      const leaderId = body.leaderId === '' ? null : (body.leaderId !== undefined ? body.leaderId : old?.leaderId || null)
+      const currentMembers = old ? await db.collection('workspace_members').find({ workspaceId: workspace.id, groupId: old.id, status: 'active' }).toArray() : []
+      const memberIds = ids(body.memberIds ?? currentMembers.map(m => m.userId))
+      if (leaderId && !memberIds.includes(leaderId)) memberIds.push(id(leaderId, 'Leader'))
+      const selected = await workspaceUsers(db, workspace.id, memberIds)
+      if (leaderId) {
+        const leader = selected.find(m => m.userId === leaderId)
+        if (['viewer', 'teacher'].includes(leader.role)) invalid('Choisissez un membre, chef, admin ou owner comme leader')
       }
-      await db.collection('groups').insertOne(group)
+      const group = { id: old?.id || uuidv4(), workspaceId: workspace.id, name, description, leaderId, memberIds, createdAt: old?.createdAt || new Date() }
+      if (old) await db.collection('groups').updateOne({ id: old.id, workspaceId: workspace.id }, { $set: group })
+      else await db.collection('groups').insertOne(group)
+      await db.collection('workspace_members').updateMany({ workspaceId: workspace.id, groupId: group.id, userId: { $nin: memberIds } }, { $set: { groupId: null } })
+      await db.collection('workspace_members').updateMany({ workspaceId: workspace.id, userId: { $in: memberIds }, status: 'active' }, { $set: { groupId: group.id } })
+      if (leaderId) await db.collection('workspace_members').updateOne({ workspaceId: workspace.id, userId: leaderId, role: 'member' }, { $set: { role: 'leader' } })
+      await syncGroups(db, workspace.id)
+      if (!old) await db.collection('channels').insertOne({ id: uuidv4(), workspaceId: workspace.id, name, type: 'group', groupId: group.id, createdAt: new Date() })
       return json(strip(group))
     }
-
-    if (route.startsWith('/groups/') && method === 'GET') {
-      const groupId = route.split('/')[2]
+    if (groupMatch && method === 'DELETE') {
+      if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
+      const groupId = groupMatch[1]
+      const group = await db.collection('groups').findOne({ id: groupId, workspaceId: workspace.id })
+      if (!group) return err('Groupe introuvable', 404)
+      if (await db.collection('tasks').countDocuments({ workspaceId: workspace.id, groupId })) return err('Ce groupe contient des tâches, y compris dans la corbeille. Restaurez puis déplacez les tâches de la corbeille avant de supprimer le groupe.', 409)
+      await db.collection('workspace_members').updateMany({ workspaceId: workspace.id, groupId }, { $set: { groupId: null } })
+      // Preserve the conversation history, but remove access for former group members.
+      await db.collection('channels').updateMany({ workspaceId: workspace.id, groupId }, { $set: { archivedAt: new Date() } })
+      await db.collection('groups').deleteOne({ id: groupId, workspaceId: workspace.id })
+      return json({ ok: true })
+    }
+    if (groupMatch && method === 'GET') {
+      const groupId = groupMatch[1]
       const g = await db.collection('groups').findOne({ id: groupId, workspaceId: workspace.id })
       if (!g) return err('Groupe introuvable', 404)
-      const users = await db.collection('users').find({ id: { $in: g.memberIds || [] } }).toArray()
-      const leader = users.find(u => u.id === g.leaderId)
+      if (!canViewGroup(member, g)) return err('Non autorisé', 403)
+      const memberships = await db.collection('workspace_members').find({ workspaceId: workspace.id, groupId, status: 'active' }).toArray()
+      const users = await db.collection('users').find({ id: { $in: memberships.map(m => m.userId) } }).toArray()
       const tasks = await db.collection('tasks').find({ groupId, workspaceId: workspace.id, deletedAt: { $exists: false } }).toArray()
-      const { _id, ...rest } = g
-      return json({
-        ...rest, leader: strip(leader),
-        members: users.map(strip),
-        tasks: cleanArr(tasks),
-      })
+      return json({ ...strip(g), leader: strip(users.find(u => u.id === g.leaderId)), members: users.map(strip), tasks: cleanArr(tasks) })
     }
 
     // ============ TASKS ============
@@ -525,23 +593,26 @@ async function handleRoute(request, { params }) {
         if (scope === 'group' && member.groupId) query.groupId = member.groupId
       } else {
         if (scope === 'mine') query.assignees = user.id
-        else if (scope === 'group') query.groupId = member.groupId
-        else query.$or = [{ groupId: member.groupId }, { assignees: user.id }]
+        else if (scope === 'group' && member.groupId) query.groupId = member.groupId
+        else query.$or = [...(member.groupId ? [{ groupId: member.groupId }] : []), { assignees: user.id }, { createdBy: user.id }]
       }
       const tasks = await db.collection('tasks').find(query).sort({ dueDate: 1 }).toArray()
       return json(cleanArr(tasks))
     }
 
     if (route === '/tasks' && method === 'POST') {
-      const body = await request.json()
+      const body = await readBody()
+      await taskInput(db, workspace.id, body)
       const groupId = body.groupId || member.groupId
       if (!groupId) return err('Groupe requis', 400)
       const group = await db.collection('groups').findOne({ id: groupId, workspaceId: workspace.id })
       if (!group) return err('Groupe introuvable', 404)
       const isPriv = ['owner','admin'].includes(member.role)
       const isLeader = member.role === 'leader' && group.leaderId === user.id
-      const isMember = (group.memberIds || []).includes(user.id)
+      const isMember = member.groupId === group.id && member.role === 'member'
       if (!isPriv && !isLeader && !isMember) return err('Non autorisé', 403)
+      if (!isPriv && !isLeader && body.status === 'done') return err('La validation appartient au responsable', 403)
+      if (body.status === 'review' && body.proofRequired) return err('Ajoutez une preuve avant la validation', 400)
       const task = {
         id: uuidv4(), workspaceId: workspace.id,
         title: body.title || 'Nouvelle tâche', description: body.description || '',
@@ -575,6 +646,7 @@ async function handleRoute(request, { params }) {
       const sub = taskIdMatch[2]
       const task = await db.collection('tasks').findOne({ id: taskId, workspaceId: workspace.id })
       if (!task) return err('Tâche introuvable', 404)
+      if (task.deletedAt && !(sub === 'restore' && method === 'POST' && canManageWorkspace(member.role))) return err('Tâche introuvable', 404)
       const group = await db.collection('groups').findOne({ id: task.groupId, workspaceId: workspace.id })
       const canManage = canManageGroupTasks({ ...member, userId: user.id }, group)
       const isAssignee = task.assignees?.includes(user.id)
@@ -585,8 +657,11 @@ async function handleRoute(request, { params }) {
       }
       if (!sub && method === 'PATCH') {
         if (!canManage && !isAssignee) return err('Non autorisé', 403)
-        const body = await request.json()
+        const body = await readBody()
         const allowed = {}
+        await taskInput(db, workspace.id, body, task)
+        if (!canManage && body.status === 'done') return err('La validation appartient au responsable', 403)
+        if ('groupId' in body && body.groupId !== task.groupId && !canManageWorkspace(member.role)) return err('Seul un admin peut déplacer une tâche entre groupes', 403)
         const memberFields = ['status']
         const managerFields = ['title', 'description', 'assignees', 'priority', 'startDate', 'dueDate', 'proofRequired', 'groupId']
         for (const f of memberFields) if (f in body) allowed[f] = body[f]
@@ -656,7 +731,8 @@ async function handleRoute(request, { params }) {
       }
       if (sub === 'comments' && method === 'POST') {
         if (!canViewTask({ ...member, userId: user.id }, task)) return err('Non autorisé', 403)
-        const body = await request.json()
+        const body = await readBody()
+        text(body.content, 'Commentaire', 4000, true)
         const c = { id: uuidv4(), userId: user.id, userName: user.firstName, content: body.content || '', createdAt: new Date() }
         await db.collection('tasks').updateOne({ id: taskId }, { $push: { comments: c }, $set: { updatedAt: new Date() } })
         // notify assignees + creator (except self)
@@ -673,11 +749,14 @@ async function handleRoute(request, { params }) {
       }
       if (sub === 'proofs' && method === 'POST') {
         if (!canViewTask({ ...member, userId: user.id }, task)) return err('Non autorisé', 403)
-        const body = await request.json()
+        const body = await readBody()
         if (body.fileData) {
           const v = validateDataUrl(body.fileData, UPLOAD_LIMITS.taskProof)
           if (!v.ok) return err(v.error, 400)
         }
+        if ((task.proofs?.length || 0) >= 4) return err('Maximum 4 preuves par tâche', 400)
+        if (!body.fileData && !body.text && !body.linkUrl) invalid('Preuve vide')
+        if (body.linkUrl && !/^https?:\/\//i.test(body.linkUrl)) invalid('Lien HTTP ou HTTPS requis')
         const proof = {
           id: uuidv4(), userId: user.id, userName: user.firstName,
           type: body.type || 'file', fileData: body.fileData || null, fileName: body.fileName || null,
@@ -689,8 +768,11 @@ async function handleRoute(request, { params }) {
       }
       if (sub === 'validate' && method === 'POST') {
         if (!canManage) return err('Non autorisé', 403)
-        const body = await request.json()
-        const approved = !!body.approved
+        const body = await readBody()
+        if (typeof body.approved !== 'boolean') invalid('Décision invalide')
+        if (task.status !== 'review') return err('La tâche doit être en attente de validation', 409)
+        if (body.approved && task.proofRequired && !task.proofs?.length) return err('Preuve requise', 400)
+        const approved = body.approved
         const history = task.history || []
         history.push({ userId: user.id, action: approved ? 'validated' : 'rejected', comment: body.comment || '', at: new Date() })
         const update = {
@@ -766,11 +848,11 @@ async function handleRoute(request, { params }) {
       const to = url.searchParams.get('to')
       const scope = url.searchParams.get('scope') || 'group'
       let query = { workspaceId: workspace.id, deletedAt: { $exists: false } }
-      if (from && to) query.dueDate = { $gte: new Date(from), $lte: new Date(to) }
+      if (from && to) { const start = date(from); const end = date(to); if (start > end) invalid('Période invalide'); query.dueDate = { $gte: start, $lte: end } }
       const priv = ['owner','admin','teacher'].includes(member.role)
       if (scope === 'mine') query.assignees = user.id
       else if (scope === 'group' && member.groupId && !priv) query.groupId = member.groupId
-      else if (!priv && scope !== 'mine') query.$or = [{ groupId: member.groupId }, { assignees: user.id }]
+      else if (!priv && scope !== 'mine') query.$or = [...(member.groupId ? [{ groupId: member.groupId }] : []), { assignees: user.id }, { createdBy: user.id }]
       const tasks = await db.collection('tasks').find(query).toArray()
       return json(cleanArr(tasks))
     }
@@ -779,13 +861,7 @@ async function handleRoute(request, { params }) {
     if (route === '/channels' && method === 'GET') {
       const chs = await db.collection('channels').find({ workspaceId: workspace.id }).toArray()
       const priv = ['owner','admin'].includes(member.role)
-      const visible = chs.filter(c => {
-        if (priv) return true
-        if (c.type === 'workspace') return true
-        if (c.type === 'leaders') return member.role === 'leader'
-        if (c.type === 'group') return c.groupId === member.groupId
-        return false
-      })
+      const visible = chs.filter(c => (!c.archivedAt || priv) && canReadChannel(member, c))
       // enrich with unread count
       const enriched = await Promise.all(visible.map(async c => {
         const { _id, ...rest } = c
@@ -797,19 +873,61 @@ async function handleRoute(request, { params }) {
       return json(enriched)
     }
 
+    if (route === '/channels' && method === 'POST') {
+      if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
+      const body = await readBody()
+      const name = text(body.name, 'Nom du salon', 60, true)
+      if (!['workspace', 'group', 'private'].includes(body.type)) invalid('Type de salon invalide')
+      if (body.type === 'group') await workspaceGroup(db, workspace.id, body.groupId)
+      const memberIds = body.type === 'private' ? ids(body.memberIds || []) : []
+      if (body.type === 'private' && !memberIds.includes(user.id)) memberIds.push(user.id)
+      await workspaceUsers(db, workspace.id, memberIds)
+      const channel = { id: uuidv4(), workspaceId: workspace.id, name, type: body.type, groupId: body.type === 'group' ? body.groupId : null, memberIds, createdAt: new Date(), createdBy: user.id }
+      await db.collection('channels').insertOne(channel)
+      return json(strip(channel))
+    }
+    const channelMatch = route.match(/^\/channels\/([^/]+)$/)
+    if (channelMatch && method === 'PATCH') {
+      if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
+      const channel = await db.collection('channels').findOne({ id: channelMatch[1], workspaceId: workspace.id })
+      if (!channel) return err('Salon introuvable', 404)
+      const body = await readBody()
+      const update = {}
+      if ('name' in body) update.name = text(body.name, 'Nom du salon', 60, true)
+      if ('archived' in body) {
+        if (typeof body.archived !== 'boolean') invalid('Archivage invalide')
+        update.archivedAt = body.archived ? new Date() : null
+      }
+      if ('memberIds' in body) {
+        if (channel.type !== 'private') invalid('Les membres sont définis par le type de ce salon')
+        await workspaceUsers(db, workspace.id, body.memberIds)
+        update.memberIds = ids(body.memberIds)
+      }
+      await db.collection('channels').updateOne({ id: channel.id, workspaceId: workspace.id }, { $set: update })
+      return json({ ...strip(channel), ...update })
+    }
+
     const chMatch = route.match(/^\/channels\/([^/]+)\/messages$/)
     if (chMatch && method === 'GET') {
       const channelId = chMatch[1]
       const ch = await db.collection('channels').findOne({ id: channelId, workspaceId: workspace.id })
       if (!ch) return err('Channel introuvable', 404)
       const priv = ['owner','admin'].includes(member.role)
-      const canRead = priv || ch.type === 'workspace' || (ch.type === 'leaders' && member.role === 'leader') || (ch.type === 'group' && ch.groupId === member.groupId)
+      const canRead = canReadChannel(member, ch) && (!ch.archivedAt || priv)
       if (!canRead) return err('Non autorisé', 403)
       const url = new URL(request.url)
       const since = url.searchParams.get('since')
       const q = { channelId, workspaceId: workspace.id }
-      if (since) q.createdAt = { $gt: new Date(since) }
-      const messages = await db.collection('messages').find(q).sort({ createdAt: 1 }).limit(200).toArray()
+      if (since) q.createdAt = { $gt: date(since) }
+      const before = url.searchParams.get('before')
+      const beforeId = url.searchParams.get('beforeId')
+      if (before) {
+        const at = date(before)
+        if (beforeId) q.$or = [{ createdAt: { $lt: at } }, { createdAt: at, id: { $lt: id(beforeId) } }]
+        else q.createdAt = { $lt: at }
+      }
+      const messages = await db.collection('messages').find(q).sort({ createdAt: -1, id: -1 }).limit(200).toArray()
+      messages.reverse()
       // mark as read
       await db.collection('channel_reads').updateOne(
         { channelId, userId: user.id },
@@ -823,9 +941,12 @@ async function handleRoute(request, { params }) {
       const ch = await db.collection('channels').findOne({ id: channelId, workspaceId: workspace.id })
       if (!ch) return err('Channel introuvable', 404)
       const priv = ['owner','admin'].includes(member.role)
-      const canWrite = priv || ch.type === 'workspace' || (ch.type === 'leaders' && member.role === 'leader') || (ch.type === 'group' && ch.groupId === member.groupId)
+      const canWrite = canReadChannel(member, ch) && (!ch.archivedAt || priv)
       if (!canWrite) return err('Non autorisé', 403)
-      const body = await request.json()
+      if (ch.archivedAt) return err('Ce salon est archivé', 403)
+      const body = await readBody()
+      text(body.content, 'Message', 4000, true)
+      if (body.replyToId && !await db.collection('messages').findOne({ id: body.replyToId, channelId, workspaceId: workspace.id })) invalid('Message parent introuvable')
       const msg = {
         id: uuidv4(), workspaceId: workspace.id, channelId,
         userId: user.id, userName: user.firstName,
@@ -841,7 +962,7 @@ async function handleRoute(request, { params }) {
         const wsMembers = await db.collection('workspace_members').find({ workspaceId: workspace.id, status: 'active' }).toArray()
         const usersInWs = await db.collection('users').find({ id: { $in: wsMembers.map(m => m.userId) } }).toArray()
         for (const u of usersInWs) {
-          if (mentions.includes(u.firstName.toLowerCase()) && u.id !== user.id) {
+          if (mentions.includes(u.firstName.toLowerCase()) && u.id !== user.id && canReadChannel(wsMembers.find(m => m.userId === u.id), ch)) {
             await createNotification(db, {
               workspaceId: workspace.id, userId: u.id, type: 'mention',
               title: `${user.firstName} vous a mentionné`,
@@ -862,7 +983,7 @@ async function handleRoute(request, { params }) {
       return json(cleanArr(notifs))
     }
     if (route === '/notifications/mark-read' && method === 'POST') {
-      const body = await request.json().catch(() => ({}))
+      const body = await readBody().catch(() => ({}))
       const q = { userId: user.id, workspaceId: workspace.id }
       if (body.id) q.id = body.id
       await db.collection('notifications').updateMany(q, { $set: { read: true, readAt: new Date() } })
@@ -948,7 +1069,7 @@ async function handleRoute(request, { params }) {
     // ============ WORKSPACE SETTINGS ============
     if (route === '/workspace' && method === 'PATCH') {
       if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
-      const body = await request.json()
+      const body = await readBody()
       if (body.logo) {
         const v = validateDataUrl(body.logo, UPLOAD_LIMITS.workspaceLogo)
         if (!v.ok) return err(v.error, 400)
@@ -971,15 +1092,16 @@ async function handleRoute(request, { params }) {
         if (owners <= 1) return err("Vous êtes l'unique owner. Transférez la propriété avant de quitter.", 400)
       }
       await db.collection('workspace_members').deleteOne({ id: member.id })
-      await db.collection('groups').updateMany({ workspaceId: workspace.id }, { $pull: { memberIds: user.id } })
+      await syncGroups(db, workspace.id)
       await audit(db, { workspaceId: workspace.id, actorId: user.id, action: 'member_left' })
       return json({ ok: true })
     }
 
     if (route === '/workspace/transfer-ownership' && method === 'POST') {
       if (member.role !== 'owner') return err('Seul un owner peut transférer la propriété', 403)
-      const body = await request.json()
+      const body = await readBody()
       if (!body.targetUserId) return err('Utilisateur cible requis', 400)
+      if (body.targetUserId === user.id) return err('Choisissez un autre membre', 400)
       const target = await db.collection('workspace_members').findOne({ workspaceId: workspace.id, userId: body.targetUserId, status: 'active' })
       if (!target) return err('Membre cible introuvable', 404)
       await db.collection('workspace_members').updateOne({ id: target.id }, { $set: { role: 'owner' } })
@@ -1025,7 +1147,10 @@ async function handleRoute(request, { params }) {
     }
     if (route === '/workspace/invitations' && method === 'POST') {
       if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
-      const body = await request.json()
+      const body = await readBody()
+      if (body.groupId) await workspaceGroup(db, workspace.id, body.groupId)
+      if (body.expiresInDays !== undefined && (!Number.isInteger(body.expiresInDays) || body.expiresInDays < 1 || body.expiresInDays > 365)) invalid('Durée invalide')
+      if (body.maxUses != null && (!Number.isInteger(body.maxUses) || body.maxUses < 1 || body.maxUses > 10000)) invalid('Nombre d’utilisations invalide')
       const inv = {
         id: uuidv4(), workspaceId: workspace.id,
         email: (body.email || '').toLowerCase().trim() || null,
@@ -1051,10 +1176,10 @@ async function handleRoute(request, { params }) {
     }
     if (invMatch && method === 'PATCH') {
       if (!canManageWorkspace(member.role)) return err('Non autorisé', 403)
-      const body = await request.json()
+      const body = await readBody()
       const upd = {}
       if ('status' in body && ['pending', 'revoked'].includes(body.status)) upd.status = body.status
-      if ('expiresAt' in body) upd.expiresAt = body.expiresAt ? new Date(body.expiresAt) : null
+      if ('expiresAt' in body) upd.expiresAt = body.expiresAt ? date(body.expiresAt) : null
       await db.collection('invitations').updateOne({ id: invMatch[1], workspaceId: workspace.id }, { $set: upd })
       return json({ ok: true })
     }
@@ -1079,7 +1204,9 @@ async function handleRoute(request, { params }) {
       const group = await db.collection('groups').findOne({ id: task.groupId, workspaceId: workspace.id })
       const canManage = canManageGroupTasks({ ...member, userId: user.id }, group)
       if (!canManage) return err('Non autorisé', 403)
-      const body = await request.json()
+      const body = await readBody()
+      if (task.deletedAt) return err('Tâche introuvable', 404)
+      await taskInput(db, workspace.id, body, task)
       const update = { updatedAt: new Date() }
       if (body.startDate) update.startDate = new Date(body.startDate)
       if (body.dueDate) update.dueDate = new Date(body.dueDate)
@@ -1093,14 +1220,16 @@ async function handleRoute(request, { params }) {
 
     return err(`Route ${route} not found`, 404, request)
   } catch (e) {
+    if (e.status === 400) return err(e.message, 400, request)
     console.error('API error', e)
     // Do NOT leak internal error messages to the client (SEC hardening).
     return err('Erreur serveur', 500, request)
   }
 }
 
-export const GET = handleRoute
-export const POST = handleRoute
-export const PUT = handleRoute
-export const DELETE = handleRoute
-export const PATCH = handleRoute
+async function respond(request, context) { return cors(await handleRoute(request, context), request) }
+export const GET = respond
+export const POST = respond
+export const PUT = respond
+export const DELETE = respond
+export const PATCH = respond

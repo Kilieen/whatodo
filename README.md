@@ -8,27 +8,27 @@ Whatodo lets teams organize tasks across multiple workspaces with role-based per
 
 ## Stack
 
-- **Frontend**: Next.js 15 (App Router), React 19, Tailwind CSS, shadcn/ui, dnd-kit, lucide-react
-- **Backend**: Next.js API routes (single file, monolithic today — will be split post-migration)
-- **Database**: MongoDB via native driver (will be replaced by Supabase Postgres after migration)
-- **Auth**: custom JWT (jsonwebtoken + bcryptjs) — will be replaced by Supabase Auth after migration
-- **PWA**: manifest + service worker (offline shell caching)
+- **Frontend**: Next.js 15 (App Router), React 18.3, Tailwind CSS, shadcn/ui, dnd-kit, lucide-react
+- **Backend**: Next.js API routes (single route handler)
+- **Database**: MongoDB via native driver
+- **Auth**: custom JWT (jsonwebtoken + bcryptjs)
+- **PWA**: manifest + service worker (network-first navigation, explicit offline fallback)
 
 ## Features
 
 - Real signup / login / password change / delete-account (with password confirmation, show/hide, strength check)
-- Password-reset flow structured (email delivery is handled by Supabase Auth after migration)
+- Password-reset API available; email delivery and reset form are not configured
 - User profile: avatar, timezone, locale, bio, notification preferences
 - Multi-step **onboarding wizard** (name → identity → groups → first task → ready)
 - Interactive **tutorial tour** (5-7 steps) on first workspace, replayable from Profile
 - Multi-workspace with per-workspace roles: `owner`, `admin`, `leader`, `member`, `teacher`, `viewer`
 - Invite via short code + per-invitation tokens (revoke / expire)
 - Workspace settings: general, invitations, audit log, danger zone (leave / transfer ownership / archive / delete)
-- Tasks: statuses, priorities, assignees, proofs (base64 upload today — Storage after migration), comments, soft delete + restore
+- Tasks: statuses, priorities, assignees, proofs (bounded base64 uploads in MongoDB), comments, soft delete + restore
 - Kanban board with drag & drop (dnd-kit + `snapCenterToCursor`)
 - Calendar (month / week / day) with filters
 - **Interactive Gantt** — drag to move a bar, resize left/right handles to shift start/end dates (owner / admin / group leader only)
-- Chat channels (workspace / leaders / group) with mentions and 3.5 s polling (Realtime after migration)
+- Chat channels (workspace / leaders / group / private) with mentions, archive, message pagination and 3.5 s polling
 - Notifications on task assignment, validation, comment, mention — with per-user preferences
 - Admin pilot dashboard: KPIs, donut chart, 30-day trend, member workload
 - Empty states everywhere — the app never feels broken when empty
@@ -52,6 +52,8 @@ On first launch, no user exists. Create an account from the login screen (`Crée
 
 ## Production build
 
+See [RENDER.md](./RENDER.md). `MONGO_URL`, `DB_NAME` and `JWT_SECRET` must be configured; preserve the existing production database name and JWT secret.
+
 ```bash
 yarn build
 yarn start
@@ -61,7 +63,7 @@ yarn start
 
 ```
 app/
-├── api/[[...path]]/route.js  # all API routes (monolithic — will be split post-migration)
+├── api/[[...path]]/route.js  # all API routes (single route handler)
 ├── page.js                   # main React app (single-page state machine)
 ├── layout.js                 # root layout with SW registration
 ├── globals.css               # design tokens + component classes
@@ -96,7 +98,7 @@ node scripts/wipe-demo.js  # backup, then wipe every collection (used once to re
 - `POST /auth/register`, `POST /auth/login`
 - `GET /auth/me`, `PATCH /auth/me` (profile + notif prefs + tutorial state)
 - `POST /auth/change-password`
-- `POST /auth/forgot-password` (structural — email delivery via Supabase Auth after migration)
+- `POST /auth/forgot-password` (email delivery not configured)
 - `POST /auth/delete-account`
 
 ### Workspaces (no header for list/create/join)
@@ -126,6 +128,6 @@ node scripts/wipe-demo.js  # backup, then wipe every collection (used once to re
 - Deleted tasks use soft delete (`deletedAt`) so owner/admin can restore them.
 - Workspace archival is soft (`archivedAt`) — data preserved.
 
-## Migration
+## Deployment
 
-See [MIGRATION.md](./MIGRATION.md) for the full plan to move Whatodo out of Emergent to GitHub + Supabase + Vercel.
+Current deployment: **Render + MongoDB Atlas**. See [RENDER.md](./RENDER.md) for configuration, tests and limitations. `MIGRATION.md` and `FINAL_REPORT.md` are historical documents, not the current deployment plan.

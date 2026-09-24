@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useRef } from 'react'
+import { apiFetch, getToken, getWorkspaceId } from '@/lib/api-client'
 import { useTheme } from 'next-themes'
 import { toast } from 'sonner'
 import {
@@ -46,24 +47,22 @@ function WhatodoLogo({ size = 40, className = '', stroke = 'currentColor' }) {
 // ================================================================
 // API
 // ================================================================
-const API = '/api'
-function getToken() { return typeof window !== 'undefined' ? localStorage.getItem('whatodo_token') : null }
-function getWorkspaceId() { return typeof window !== 'undefined' ? localStorage.getItem('whatodo_workspace') : null }
-async function apiFetch(path, opts = {}) {
-  const token = getToken()
-  const wid = getWorkspaceId()
-  const res = await fetch(API + path, {
-    ...opts,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(wid ? { 'X-Workspace-Id': wid } : {}),
-      ...(opts.headers || {}),
-    },
-  })
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || 'Erreur')
-  return data
+function LoadError({ error, onRetry }) {
+  return <div role="alert" className="surface p-6 text-center space-y-3"><p className="text-sm text-2">{error?.message || 'Chargement impossible.'}</p><button className="btn-ghost rounded-xl px-4 py-2 text-sm" onClick={onRetry}>Réessayer</button></div>
+}
+
+function useApiData(path, refreshKey = 0) {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [attempt, setAttempt] = useState(0)
+  useEffect(() => {
+    let current = true
+    setLoading(true); setError(null)
+    apiFetch(path).then(value => { if (current) setData(value) }).catch(e => { if (current) setError(e) }).finally(() => { if (current) setLoading(false) })
+    return () => { current = false }
+  }, [path, refreshKey, attempt])
+  return { data, error, loading, retry: () => setAttempt(n => n + 1) }
 }
 
 // ================================================================
@@ -85,7 +84,7 @@ const PRIORITY = {
   urgent: { label: 'Urgente', cls: 'text-red-200 bg-red-400/10 border-red-400/15' },
 }
 
-const ROLE_LABEL = { admin: 'Administrateur', leader: 'Chef de groupe', student: 'Élève', teacher: 'Enseignant' }
+const ROLE_LABEL = { owner: 'Propriétaire', member: 'Membre', viewer: 'Lecture seule', admin: 'Administrateur', leader: 'Chef de groupe', student: 'Élève', teacher: 'Enseignant' }
 
 function initials(name = '') {
   return name.split(' ').filter(Boolean).map(s => s[0]).join('').toUpperCase().slice(0, 2) || '?'
@@ -122,8 +121,8 @@ function UserAvatar({ user, size = 30 }) {
 function StatusDot({ status, withLabel }) {
   return (
     <span className="inline-flex items-center gap-1.5 text-xs text-2">
-      <span className={`dot ${STATUS[status].dot}`} />
-      {withLabel && STATUS[status].label}
+      <span className={`dot ${(STATUS[status] || STATUS.todo).dot}`} />
+      {withLabel && (STATUS[status] || STATUS.todo).label}
     </span>
   )
 }
@@ -268,7 +267,7 @@ function TaskCard({ task, users, onOpen, isDragging, isOverlay }) {
         }
         ${isDragging && !isOverlay ? 'opacity-0' : ''}`}>
       <div className="flex items-start gap-2 mb-3">
-        <span className={`dot ${STATUS[task.status].dot} mt-1.5`} />
+        <span className={`dot ${(STATUS[task.status] || STATUS.todo).dot} mt-1.5`} />
         <p className="text-[13.5px] font-medium leading-snug text-white flex-1">{task.title}</p>
       </div>
       <div className="flex items-center justify-between">
@@ -314,8 +313,8 @@ function DroppableColumn({ id, children, count }) {
       }`}>
       <div className="flex items-center justify-between mb-3 px-1">
         <div className="flex items-center gap-2">
-          <span className={`dot ${STATUS[id].dot}`} />
-          <h3 className="text-[13px] font-semibold text-white">{STATUS[id].label}</h3>
+          <span className={`dot ${(STATUS[id] || STATUS.todo).dot}`} />
+          <h3 className="text-[13px] font-semibold text-white">{(STATUS[id] || STATUS.todo).label}</h3>
           <span className="text-[11px] text-3 tabular-nums">{count}</span>
         </div>
         <button className="icon-btn" style={{ width: 24, height: 24 }}><Plus className="w-3 h-3" /></button>
@@ -488,15 +487,12 @@ function MiniCalendar({ markers = [], onDayClick, compact = false }) {
 // DASHBOARD
 // ================================================================
 function DashboardView({ me, group, users, onOpenTask, onNavigate, onCreate }) {
-  const [data, setData] = useState(null)
+  const { data, error, loading, retry } = useApiData('/dashboard')
   const [taskFilter, setTaskFilter] = useState('today') // today | week | all
   const [selectedDay, setSelectedDay] = useState(null)
 
-  useEffect(() => {
-    apiFetch('/dashboard').then(setData).catch(e => toast.error(e.message))
-  }, [])
-
-  if (!data) return <div className="p-16 flex justify-center"><Loader2 className="w-5 h-5 animate-spin text-white/30" /></div>
+  if (error) return <LoadError error={error} onRetry={retry} />
+  if (loading || !data) return <div className="p-16 flex justify-center"><Loader2 className="w-5 h-5 animate-spin text-white/30" /></div>
 
   const stats = data.stats
   const now = new Date()
@@ -516,7 +512,6 @@ function DashboardView({ me, group, users, onOpenTask, onNavigate, onCreate }) {
     { label: 'À faire', value: stats.todo, color: '#475569' },
   ]
 
-  const daysToEvent = Math.ceil((new Date('2026-11-11') - now) / 86400000)
 
   return (
     <div className="space-y-6 anim-fade-up">
@@ -570,11 +565,11 @@ function DashboardView({ me, group, users, onOpenTask, onNavigate, onCreate }) {
             {filteredTasks.slice(0, 5).map(t => (
               <div key={t.id} onClick={() => onOpenTask(t)}
                 className="group flex items-start gap-3 p-3 rounded-xl border border-[color:var(--w-border)] hover:border-white/15 hover:bg-white/[0.02] cursor-pointer transition">
-                <span className={`dot ${STATUS[t.status].dot} mt-1.5`} />
+                <span className={`dot ${(STATUS[t.status] || STATUS.todo).dot} mt-1.5`} />
                 <div className="flex-1 min-w-0">
                   <p className="text-[13.5px] font-medium leading-snug">{t.title}</p>
                   <div className="flex items-center gap-2 text-[11px] text-3 mt-1">
-                    <span>{STATUS[t.status].label}</span>
+                    <span>{(STATUS[t.status] || STATUS.todo).label}</span>
                     <span>·</span>
                     <span className={isOverdue(t) ? 'text-red-300' : ''}>{fmtDate(t.dueDate)}</span>
                   </div>
@@ -704,14 +699,7 @@ function DashboardView({ me, group, users, onOpenTask, onNavigate, onCreate }) {
 
       </div>
 
-      {/* Event footer bar */}
-      <div className="surface-flat px-5 py-4 flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <p className="text-[11px] text-3 uppercase tracking-wider mb-0.5">Événement</p>
-          <p className="text-sm font-semibold">Speed Dating Entreprises — <span className="serif italic text-white/90">11 novembre 2026</span></p>
-        </div>
-        <p className="text-sm text-2">Dans <span className="text-white font-semibold tabular-nums">{daysToEvent}</span> jours</p>
-      </div>
+
     </div>
   )
 }
@@ -720,16 +708,20 @@ function DashboardView({ me, group, users, onOpenTask, onNavigate, onCreate }) {
 // TASKS VIEW
 // ================================================================
 function TasksView({ me, users, onOpenTask, refreshKey }) {
+  const [error, setError] = useState(null)
   const [tasks, setTasks] = useState([])
   const [view, setView] = useState('kanban')
   const [scope, setScope] = useState('mine')
 
   async function load() {
-    try { setTasks(await apiFetch(`/tasks?scope=${scope}`)) } catch (e) { toast.error(e.message) }
+    setError(null)
+    try { setTasks(await apiFetch(`/tasks?scope=${scope}`)) } catch (e) { setError(e) }
   }
   useEffect(() => { load() }, [scope, refreshKey])
 
   async function handleStatusChange(task, newStatus) {
+    if (me.role === 'viewer' || me.readOnly) return toast.error('Accès en lecture seule')
+    if (newStatus === 'done' && !['owner', 'admin', 'leader'].includes(me.role)) return toast.error('La validation appartient au responsable')
     setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: newStatus } : t))
     try {
       const updated = await apiFetch(`/tasks/${task.id}`, { method: 'PATCH', body: JSON.stringify({ status: newStatus }) })
@@ -742,6 +734,7 @@ function TasksView({ me, users, onOpenTask, refreshKey }) {
 
   return (
     <div className="space-y-5 anim-fade-up">
+      {error && <LoadError error={error} onRetry={load} />}
       <div className="flex items-end justify-between flex-wrap gap-3">
         <div>
           <p className="text-sm text-2 mb-1">Vue personnelle</p>
@@ -771,11 +764,11 @@ function TasksView({ me, users, onOpenTask, refreshKey }) {
           {tasks.map(t => (
             <div key={t.id} onClick={() => onOpenTask(t)}
               className="flex items-center gap-3 px-4 py-3 hover:bg-white/[0.02] cursor-pointer transition">
-              <span className={`dot ${STATUS[t.status].dot}`} />
+              <span className={`dot ${(STATUS[t.status] || STATUS.todo).dot}`} />
               <div className="flex-1 min-w-0">
                 <p className="text-[13.5px] font-medium truncate">{t.title}</p>
                 <div className="flex items-center gap-2 text-[11px] text-3 mt-0.5">
-                  <span>{STATUS[t.status].label}</span>
+                  <span>{(STATUS[t.status] || STATUS.todo).label}</span>
                   <span>·</span>
                   <span className={isOverdue(t) ? 'text-red-300' : ''}>{fmtDate(t.dueDate)}</span>
                 </div>
@@ -797,15 +790,18 @@ function TasksView({ me, users, onOpenTask, refreshKey }) {
 // ================================================================
 function GroupView({ me, users, onOpenTask, refreshKey, groupId, onCreate }) {
   const [group, setGroup] = useState(null)
+  const [error, setError] = useState(null)
   const gid = groupId || me.groupId
 
   async function load() {
     if (!gid) return
-    try { setGroup(await apiFetch(`/groups/${gid}`)) } catch (e) { toast.error(e.message) }
+    setError(null)
+    try { setGroup(await apiFetch(`/groups/${gid}`)) } catch (e) { setError(e) }
   }
   useEffect(() => { load() }, [gid, refreshKey])
 
   if (!gid) return <div className="text-center py-16 text-2">Vous n'êtes dans aucun groupe.</div>
+  if (error) return <LoadError error={error} onRetry={load} />
   if (!group) return <div className="p-12 flex justify-center"><Loader2 className="animate-spin text-white/30" /></div>
 
   const tasks = group.tasks || []
@@ -815,6 +811,8 @@ function GroupView({ me, users, onOpenTask, refreshKey, groupId, onCreate }) {
   const overdueCount = tasks.filter(isOverdue).length
 
   async function handleStatusChange(task, newStatus) {
+    if (me.role === 'viewer' || me.readOnly) return toast.error('Accès en lecture seule')
+    if (newStatus === 'done' && !['owner', 'admin', 'leader'].includes(me.role)) return toast.error('La validation appartient au responsable')
     setGroup(prev => ({ ...prev, tasks: prev.tasks.map(t => t.id === task.id ? { ...t, status: newStatus } : t) }))
     try {
       const updated = await apiFetch(`/tasks/${task.id}`, { method: 'PATCH', body: JSON.stringify({ status: newStatus }) })
@@ -893,8 +891,10 @@ function GroupView({ me, users, onOpenTask, refreshKey, groupId, onCreate }) {
 // VALIDATION
 // ================================================================
 function ValidationView({ users, groups, onOpenTask, refreshKey }) {
-  const [tasks, setTasks] = useState([])
-  useEffect(() => { apiFetch('/validation-queue').then(setTasks).catch(e => toast.error(e.message)) }, [refreshKey])
+  const { data, error, loading, retry } = useApiData('/validation-queue', refreshKey)
+  const tasks = data || []
+  if (error) return <LoadError error={error} onRetry={retry} />
+  if (loading) return <div className="p-12">Chargement…</div>
 
   return (
     <div className="space-y-5 anim-fade-up">
@@ -936,30 +936,66 @@ function ValidationView({ users, groups, onOpenTask, refreshKey }) {
   )
 }
 
-function AllGroupsView({ groups, onOpenGroup }) {
-  return (
-    <div className="space-y-5 anim-fade-up">
-      <div>
-        <p className="text-sm text-2 mb-1">Vue admin</p>
-        <h1 className="t-h1">Groupes</h1>
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {groups.map(g => (
-          <div key={g.id} onClick={() => onOpenGroup(g.id)}
-            className="surface surface-interactive p-5 cursor-pointer">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="t-h2">{g.name}</h3>
-              <ArrowUpRight className="w-4 h-4 text-3" />
-            </div>
-            <p className="text-[12px] text-3 mb-4">Chef·fe · {g.leader?.firstName}</p>
-            <div className="flex -space-x-2">
-              {g.members?.map(m => <UserAvatar key={m.id} user={m} size={28} />)}
-            </div>
-          </div>
-        ))}
-      </div>
+function AllGroupsView({ groups, users, canManage, onRefresh, onOpenGroup }) {
+  const [editing, setEditing] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const people = Object.values(users)
+  async function save(e) {
+    e.preventDefault(); setSaving(true)
+    try {
+      await apiFetch(editing.id ? `/groups/${editing.id}` : '/groups', { method: editing.id ? 'PATCH' : 'POST', body: JSON.stringify({ name: editing.name, description: editing.description || '', leaderId: editing.leaderId || null, memberIds: editing.memberIds }) })
+      setEditing(null); await onRefresh(); toast.success('Groupe enregistré')
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  async function remove(group) {
+    if (!window.confirm(`Supprimer le groupe « ${group.name} » ? Ses salons seront archivés et leurs messages conservés. Les groupes contenant des tâches ne peuvent pas être supprimés.`)) return
+    setSaving(true)
+    try { await apiFetch(`/groups/${group.id}`, { method: 'DELETE' }); await onRefresh(); toast.success('Groupe supprimé') }
+    catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  return <div className="space-y-5 anim-fade-up">
+    <div className="flex items-center justify-between gap-3"><div><p className="text-sm text-2 mb-1">Espace de travail</p><h1 className="t-h1">Groupes</h1></div>
+      {canManage && <button className="btn-primary rounded-full h-9 px-4 text-sm" onClick={() => setEditing({ name: '', description: '', leaderId: '', memberIds: [] })}>+ Nouveau groupe</button>}
     </div>
-  )
+    {!groups.length && <div className="surface p-10 text-center text-2">Aucun groupe dans cet espace.</div>}
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">{groups.map(g => <div key={g.id} className="surface p-5">
+      <button className="w-full text-left" onClick={() => onOpenGroup(g.id)}><div className="flex justify-between mb-3"><h3 className="t-h2">{g.name}</h3><ArrowUpRight className="w-4 h-4 text-3" /></div>
+        <p className="text-xs text-3 mb-4">Chef·fe · {g.leader?.firstName || 'Non assigné'}</p><div className="flex -space-x-2">{g.members?.map(m => <UserAvatar key={m.id} user={m} size={28} />)}</div></button>
+      {canManage && <div className="flex gap-3 mt-4"><button className="btn-ghost rounded-lg px-3 py-1 text-sm" onClick={() => setEditing({ ...g, memberIds: (g.members || []).map(m => m.id) })}>Modifier</button><button disabled={saving} className="text-red-300 text-sm" onClick={() => remove(g)}>Supprimer</button></div>}
+    </div>)}</div>
+    <Dialog open={!!editing} onOpenChange={open => { if (!open && !saving) setEditing(null) }}><DialogContent><DialogHeader><DialogTitle>{editing?.id ? 'Modifier le groupe' : 'Nouveau groupe'}</DialogTitle></DialogHeader>
+      {editing && <form onSubmit={save} className="space-y-4">
+        <label className="block text-sm">Nom<Input required maxLength={60} value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} /></label>
+        <label className="block text-sm">Description<Textarea maxLength={300} value={editing.description} onChange={e => setEditing({ ...editing, description: e.target.value })} /></label>
+        <label className="block text-sm">Leader<select aria-label="Leader" className="w-full bg-[color:var(--w-surface)] border rounded-lg p-2" value={editing.leaderId || ''} onChange={e => setEditing({ ...editing, leaderId: e.target.value, memberIds: [...new Set([...editing.memberIds, e.target.value].filter(Boolean))] })}><option value="">Aucun leader</option>{people.filter(u => ['owner','admin','leader','member'].includes(u.workspaceRole)).map(u => <option key={u.id} value={u.id}>{u.firstName} {u.lastName}</option>)}</select></label>
+        <fieldset className="max-h-52 overflow-auto space-y-2"><legend className="text-sm mb-2">Membres</legend>{people.map(u => <label key={u.id} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={editing.memberIds.includes(u.id)} onChange={e => setEditing({ ...editing, memberIds: e.target.checked ? [...editing.memberIds, u.id] : editing.memberIds.filter(id => id !== u.id), leaderId: !e.target.checked && editing.leaderId === u.id ? null : editing.leaderId })} />{u.firstName} {u.lastName}</label>)}</fieldset>
+        <p className="text-xs text-3">Une personne appartient à un seul groupe. L’ajouter ici la retire de son groupe précédent. Choisir un membre comme leader lui attribue le rôle Chef.</p>
+        <button disabled={saving} className="btn-primary rounded-xl px-4 py-2 text-sm">{saving ? 'Enregistrement…' : 'Enregistrer'}</button>
+      </form>}
+    </DialogContent></Dialog>
+  </div>
+}
+
+function ChannelEditor({ channel, users, groups, onClose, onSaved }) {
+  const [form, setForm] = useState(channel || { name: '', type: 'workspace', groupId: '', memberIds: [] })
+  const [saving, setSaving] = useState(false)
+  async function save(e) {
+    e.preventDefault(); setSaving(true)
+    try {
+      const body = channel ? { name: form.name, ...(form.type === 'private' ? { memberIds: form.memberIds || [] } : {}) } : { ...form, groupId: form.groupId || null }
+      const value = await apiFetch(channel ? `/channels/${channel.id}` : '/channels', { method: channel ? 'PATCH' : 'POST', body: JSON.stringify(body) })
+      await onSaved(value); onClose()
+    } catch (e) { toast.error(e.message) } finally { setSaving(false) }
+  }
+  return <Dialog open onOpenChange={open => { if (!open && !saving) onClose() }}><DialogContent><DialogHeader><DialogTitle>{channel ? 'Modifier le salon' : 'Nouveau salon'}</DialogTitle></DialogHeader>
+    <form onSubmit={save} className="space-y-4">
+      <label className="block text-sm">Nom<Input required maxLength={60} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></label>
+      {!channel && <label className="block text-sm">Type<select aria-label="Type" className="w-full bg-[color:var(--w-surface)] border rounded-lg p-2" value={form.type} onChange={e => setForm({ ...form, type: e.target.value })}><option value="workspace">Tout l’espace</option><option value="group">Groupe</option><option value="private">Privé</option></select></label>}
+      {form.type === 'group' && !channel && <label className="block text-sm">Groupe<select aria-label="Groupe" required className="w-full bg-[color:var(--w-surface)] border rounded-lg p-2" value={form.groupId} onChange={e => setForm({ ...form, groupId: e.target.value })}><option value="">Choisir un groupe</option>{groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>}
+      {form.type === 'private' && <fieldset className="max-h-52 overflow-auto space-y-2"><legend className="text-sm mb-2">Membres autorisés</legend>{Object.values(users).map(u => <label key={u.id} className="flex gap-2 text-sm"><input type="checkbox" checked={(form.memberIds || []).includes(u.id)} onChange={e => setForm({ ...form, memberIds: e.target.checked ? [...(form.memberIds || []), u.id] : form.memberIds.filter(id => id !== u.id) })} />{u.firstName} {u.lastName}</label>)}<p className="text-xs text-3">Les owners et admins conservent un accès de gestion.</p></fieldset>}
+      <button disabled={saving} className="btn-primary rounded-xl px-4 py-2 text-sm">{saving ? 'Enregistrement…' : 'Enregistrer'}</button>
+    </form>
+  </DialogContent></Dialog>
 }
 
 // ================================================================
@@ -975,11 +1011,11 @@ function TaskDialog({ task, open, onClose, me, users, groups, onUpdated, onDelet
   if (!task || !editing) return null
 
   const group = groups.find(g => g.id === task.groupId)
-  const canManage = ['owner','admin'].includes(me.role) || (me.role === 'leader' && group?.leaderId === me.id)
+  const canManage = !me.readOnly && (['owner','admin'].includes(me.role) || (me.role === 'leader' && group?.leaderId === me.id))
   const isAssignee = task.assignees?.includes(me.id)
   const isCreator = task.createdBy === me.id
-  const canEdit = canManage || isAssignee
-  const canDelete = canManage || isCreator
+  const canEdit = !me.readOnly && me.role !== 'viewer' && (canManage || isAssignee)
+  const canDelete = !me.readOnly && me.role !== 'viewer' && (canManage || isCreator)
 
   async function patch(patch) {
     setSaving(true)
@@ -993,11 +1029,12 @@ function TaskDialog({ task, open, onClose, me, users, groups, onUpdated, onDelet
     await patch({
       title: editing.title, description: editing.description, priority: editing.priority,
       assignees: editing.assignees, startDate: editing.startDate, dueDate: editing.dueDate,
-      proofRequired: editing.proofRequired,
+      proofRequired: editing.proofRequired, groupId: editing.groupId || null,
     })
   }
 
   async function sendComment() {
+    if (me.role === 'viewer' || me.readOnly) return
     if (!comment.trim()) return
     try {
       const c = await apiFetch(`/tasks/${task.id}/comments`, { method: 'POST', body: JSON.stringify({ content: comment }) })
@@ -1008,7 +1045,7 @@ function TaskDialog({ task, open, onClose, me, users, groups, onUpdated, onDelet
 
   async function uploadProof(file) {
     if (!file) return
-    if (file.size > 5 * 1024 * 1024) { toast.error('Fichier max 5 MB'); return }
+    if (file.size > 2 * 1024 * 1024) { toast.error('Fichier max 2 Mo'); return }
     const reader = new FileReader()
     reader.onload = async () => {
       try {
@@ -1096,7 +1133,7 @@ function TaskDialog({ task, open, onClose, me, users, groups, onUpdated, onDelet
               <Select value={editing.status} onValueChange={v => patch({ status: v })} disabled={!canEdit}>
                 <SelectTrigger className={inputCls + ' h-10'}><SelectValue /></SelectTrigger>
                 <SelectContent className="w-glass border-white/10">
-                  {STATUS_ORDER.map(k => <SelectItem key={k} value={k}>{STATUS[k].label}</SelectItem>)}
+                  {STATUS_ORDER.filter(k => canManage || k !== 'done').map(k => <SelectItem key={k} value={k}>{(STATUS[k] || STATUS.todo).label}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
@@ -1116,6 +1153,14 @@ function TaskDialog({ task, open, onClose, me, users, groups, onUpdated, onDelet
             </div>
           </div>
 
+          {canManage && ['owner', 'admin'].includes(me.role) && (
+            <label className={labelCls}>Groupe
+              <select aria-label="Groupe de la tâche" className={inputCls} value={editing.groupId || ''} onChange={e => setEditing({ ...editing, groupId: e.target.value || null })}>
+                <option value="">Sans groupe (créateur et personnes assignées)</option>
+                {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+              </select>
+            </label>
+          )}
           {canManage && group && (
             <div>
               <label className={labelCls}>Assigné à</label>
@@ -1190,7 +1235,7 @@ function TaskDialog({ task, open, onClose, me, users, groups, onUpdated, onDelet
 
           {/* Actions */}
           <div className="flex flex-wrap gap-2 items-center">
-            {isAssignee && task.status !== 'review' && task.status !== 'done' && (
+            {canEdit && isAssignee && task.status !== 'review' && task.status !== 'done' && (
               <button onClick={() => patch({ status: 'review' })}
                 className="h-9 px-4 rounded-xl btn-primary text-sm inline-flex items-center gap-1">
                 <CheckCheck className="w-4 h-4" /> Passer À valider
@@ -1255,7 +1300,7 @@ function TaskDialog({ task, open, onClose, me, users, groups, onUpdated, onDelet
               <input placeholder="Écrire un commentaire…" value={comment}
                 onChange={e => setComment(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendComment()}
                 className={inputCls} />
-              <button onClick={sendComment}
+              <button disabled={me.role === 'viewer' || me.readOnly} onClick={sendComment}
                 className="w-10 h-10 rounded-xl btn-primary inline-flex items-center justify-center">
                 <Send className="w-4 h-4" />
               </button>
@@ -1440,7 +1485,7 @@ function GanttBar({ t, x, w, rowHeight, dayWidth, canManage, done, status, onCom
           className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-white/40 transition" />
       )}
       <div className="h-full flex items-center px-2 gap-1.5 text-[11px] text-white/95 whitespace-nowrap pointer-events-none">
-        <span className={`dot ${STATUS[status].dot} shrink-0`} />
+        <span className={`dot ${(STATUS[status] || STATUS.todo).dot} shrink-0`} />
         <span className="truncate font-medium">{t.title}</span>
       </div>
       {canManage && (
@@ -1452,17 +1497,19 @@ function GanttBar({ t, x, w, rowHeight, dayWidth, canManage, done, status, onCom
 }
 
 function GanttView({ me, users, groups, onOpenTask, refreshKey }) {
+  const [error, setError] = useState(null)
   const [tasks, setTasks] = useState([])
   const [loading, setLoading] = useState(true)
   const [zoom, setZoom] = useState('week') // day | week | month
   const [tick, setTick] = useState(0)
 
   async function load() {
+    setError(null)
     setLoading(true)
     try {
       const t = await apiFetch('/tasks?scope=' + (['owner','admin','teacher'].includes(me.role) ? 'visible' : 'group'))
       setTasks(t.filter(x => x.startDate && x.dueDate))
-    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+    } catch (e) { setError(e) } finally { setLoading(false) }
   }
   useEffect(() => { load() }, [refreshKey])
 
@@ -1488,6 +1535,7 @@ function GanttView({ me, users, groups, onOpenTask, refreshKey }) {
   function daysToWidth(start, end) { return Math.max(dayWidth, ((new Date(end) - new Date(start)) / 86400000) * dayWidth) }
 
   function canManageTask(t) {
+    if (me.readOnly) return false
     if (['owner','admin'].includes(me.role)) return true
     const g = groups.find(gr => gr.id === t.groupId)
     if (me.role === 'leader' && g?.leaderId === me.id) return true
@@ -1523,6 +1571,7 @@ function GanttView({ me, users, groups, onOpenTask, refreshKey }) {
 
   return (
     <div className="space-y-5 anim-fade-up">
+      {error && <LoadError error={error} onRetry={load} />}
       <div className="flex items-end justify-between flex-wrap gap-3">
         <div>
           <p className="text-sm text-2 mb-1">Chronologie</p>
@@ -1607,55 +1656,95 @@ function GanttView({ me, users, groups, onOpenTask, refreshKey }) {
 // ================================================================
 // CHAT VIEW
 // ================================================================
-function ChatView({ me, users, refreshKey }) {
+function ChatView({ me, users, groups, refreshKey }) {
   const [channels, setChannels] = useState([])
   const [active, setActive] = useState(null)
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(true)
 
+  const [error, setError] = useState(null)
+  const [channelError, setChannelError] = useState(null)
+  const [editor, setEditor] = useState(null)
+  const [sending, setSending] = useState(false)
+  const [olderLoading, setOlderLoading] = useState(false)
+  const [hasOlder, setHasOlder] = useState(false)
+  const activeId = useRef(null)
+  const channelBusy = useRef(false)
+  const messageBusy = useRef(null)
+  const canManage = ['owner', 'admin'].includes(me.role) && !me.readOnly
+  const canWrite = me.role !== 'viewer' && !me.readOnly && !active?.archivedAt
+
   async function loadChannels() {
+    if (channelBusy.current) return
+    channelBusy.current = true
     try {
       const chs = await apiFetch('/channels')
-      setChannels(chs)
-      if (!active && chs.length) setActive(chs[0])
-    } catch (e) { toast.error(e.message) }
+      setChannelError(null); setChannels(chs)
+      setActive(previous => chs.find(c => c.id === previous?.id) || chs.find(c => !c.archivedAt) || chs[0] || null)
+      if (!chs.length) setLoading(false)
+    } catch (e) { setChannelError(e); setLoading(false) } finally { channelBusy.current = false }
   }
   useEffect(() => { loadChannels(); const int = setInterval(loadChannels, 10000); return () => clearInterval(int) }, [refreshKey])
 
-  async function loadMessages() {
-    if (!active) return
+  async function loadMessages(channelId, initial = false) {
+    if (!channelId || messageBusy.current === channelId) return
+    messageBusy.current = channelId
     try {
-      const ms = await apiFetch(`/channels/${active.id}/messages`)
-      setMessages(ms)
-    } catch (e) {} finally { setLoading(false) }
+      const ms = await apiFetch(`/channels/${channelId}/messages`)
+      if (activeId.current !== channelId) return
+      setError(null)
+      setMessages(previous => initial ? ms : [...new Map([...previous, ...ms].map(m => [m.id, m])).values()].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt) || a.id.localeCompare(b.id)))
+      if (initial) setHasOlder(ms.length === 200)
+    } catch (e) { if (activeId.current === channelId) setError(e) }
+    finally { if (messageBusy.current === channelId) messageBusy.current = null; if (activeId.current === channelId) setLoading(false) }
   }
   useEffect(() => {
-    if (!active) return
-    setLoading(true); loadMessages()
-    const int = setInterval(loadMessages, 3500)
-    return () => clearInterval(int)
-  }, [active])
+    activeId.current = active?.id || null
+    setMessages([]); setError(null); setHasOlder(false)
+    if (!active?.id) { setLoading(false); return }
+    setLoading(true); loadMessages(active.id, true)
+    const int = setInterval(() => loadMessages(active.id), 3500)
+    return () => { clearInterval(int); activeId.current = null }
+  }, [active?.id])
 
+  async function loadOlder() {
+    const first = messages[0]; const channelId = active?.id
+    if (!first || olderLoading) return
+    setOlderLoading(true)
+    try {
+      const ms = await apiFetch(`/channels/${channelId}/messages?before=${encodeURIComponent(first.createdAt)}&beforeId=${encodeURIComponent(first.id)}`)
+      if (activeId.current !== channelId) return
+      setMessages(previous => [...new Map([...ms, ...previous].map(m => [m.id, m])).values()]); setHasOlder(ms.length === 200); setError(null)
+    } catch (e) { if (activeId.current === channelId) setError(e) } finally { setOlderLoading(false) }
+  }
   useEffect(() => {
+    if (olderLoading) return
     const el = document.getElementById('chat-scroll')
     if (el) el.scrollTop = el.scrollHeight
-  }, [messages.length])
+  }, [messages[messages.length - 1]?.id])
 
   async function send() {
-    if (!input.trim() || !active) return
-    const content = input; setInput('')
+    if (!input.trim() || !active || sending || !canWrite) return
+    const content = input; const channelId = active.id; setSending(true)
     try {
-      const msg = await apiFetch(`/channels/${active.id}/messages`, { method: 'POST', body: JSON.stringify({ content }) })
-      setMessages(prev => [...prev, msg])
-    } catch (e) { toast.error(e.message); setInput(content) }
+      const msg = await apiFetch(`/channels/${channelId}/messages`, { method: 'POST', body: JSON.stringify({ content }) })
+      if (activeId.current === channelId) { setMessages(prev => [...new Map([...prev, msg].map(m => [m.id, m])).values()]); setInput('') }
+    } catch (e) { toast.error(e.message) } finally { setSending(false) }
+  }
+  async function archive() {
+    if (!window.confirm(active.archivedAt ? 'Réactiver ce salon ?' : 'Archiver ce salon ? Les messages seront conservés.')) return
+    try { await apiFetch(`/channels/${active.id}`, { method: 'PATCH', body: JSON.stringify({ archived: !active.archivedAt }) }); await loadChannels() }
+    catch (e) { toast.error(e.message) }
   }
 
   return (
     <div className="anim-fade-up h-[calc(100vh-140px)] md:h-[calc(100vh-200px)] flex flex-col md:flex-row gap-4">
       {/* Channels */}
       <aside className="surface p-3 md:w-64 md:shrink-0 overflow-y-auto max-h-[180px] md:max-h-none">
-        <p className="text-[11px] uppercase text-3 px-2 mb-2 font-medium">Channels</p>
+        <p className="text-[11px] uppercase text-3 px-2 mb-2 font-medium">Salons</p>
+        {canManage && <button className="btn-ghost rounded-lg px-2 py-2 mb-2 text-sm" onClick={() => setEditor({})}>+ Nouveau salon</button>}
+        {channelError && <LoadError error={channelError} onRetry={loadChannels} />}
         <div className="space-y-0.5">
           {channels.map(c => (
             <button key={c.id} onClick={() => setActive(c)}
@@ -1663,7 +1752,7 @@ function ChatView({ me, users, refreshKey }) {
                 active?.id === c.id ? 'bg-white/[0.06] text-white' : 'text-2 hover:bg-white/[0.03] hover:text-white'
               }`}>
               <span className="text-3">#</span>
-              <span className="flex-1 truncate">{c.name}</span>
+              <span className="flex-1 truncate">{c.name}{c.archivedAt ? " · archivé" : ""}</span>
               {c.unread > 0 && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-white text-[#0a1428] font-semibold tabular-nums">{c.unread}</span>
               )}
@@ -1675,15 +1764,18 @@ function ChatView({ me, users, refreshKey }) {
       {/* Messages */}
       <section className="surface flex-1 flex flex-col overflow-hidden">
         {!active ? (
-          <div className="flex-1 flex items-center justify-center text-2">Sélectionne un channel</div>
+          <div className="flex-1 flex items-center justify-center text-2">Aucun salon sélectionné</div>
         ) : (
           <>
             <div className="px-5 py-3 border-b border-[color:var(--w-border)] flex items-center gap-2">
               <span className="text-3">#</span>
               <h2 className="font-semibold">{active.name}</h2>
               <span className="text-[11px] text-3 ml-2">{active.description}</span>
+              {canManage && <div className="ml-auto flex gap-2"><button className="text-xs btn-ghost rounded-lg px-2 py-1" onClick={() => setEditor(active)}>Modifier</button><button className="text-xs btn-ghost rounded-lg px-2 py-1" onClick={archive}>{active.archivedAt ? "Réactiver" : "Archiver"}</button></div>}
             </div>
             <div id="chat-scroll" className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
+              {error && <LoadError error={error} onRetry={() => loadMessages(active.id, messages.length === 0)} />}
+              {hasOlder && <button disabled={olderLoading} className="btn-ghost rounded-lg px-3 py-2 text-xs" onClick={loadOlder}>{olderLoading ? "Chargement…" : "Messages précédents"}</button>}
               {loading && messages.length === 0 && <p className="text-center text-sm text-3">Chargement…</p>}
               {!loading && messages.length === 0 && <p className="text-center text-sm text-3">Aucun message. Sois le premier à écrire.</p>}
               {messages.map((m, i) => {
@@ -1713,17 +1805,18 @@ function ChatView({ me, users, refreshKey }) {
               })}
             </div>
             <div className="px-4 py-3 border-t border-[color:var(--w-border)] flex gap-2">
-              <input value={input} onChange={e => setInput(e.target.value)}
+              <input disabled={!canWrite || sending} maxLength={4000} value={input} onChange={e => setInput(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), send())}
-                placeholder={`Écrire dans #${active.name}…`}
+                placeholder={canWrite ? `Écrire dans #${active.name}…` : "Lecture seule"}
                 className="flex-1 h-10 px-3 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)] text-white text-sm focus:outline-none focus:border-white/25" />
-              <button onClick={send} className="w-10 h-10 rounded-xl btn-primary flex items-center justify-center">
+              <button disabled={!canWrite || sending || !input.trim()} onClick={send} className="w-10 h-10 rounded-xl btn-primary flex items-center justify-center">
                 <Send className="w-4 h-4" />
               </button>
             </div>
           </>
         )}
       </section>
+      {editor && <ChannelEditor channel={editor.id ? editor : null} users={users} groups={groups} onClose={() => setEditor(null)} onSaved={async channel => { await loadChannels(); setActive(channel) }} />}
     </div>
   )
 }
@@ -1731,23 +1824,28 @@ function ChatView({ me, users, refreshKey }) {
 // ================================================================
 // NOTIFICATIONS
 // ================================================================
-function useNotifications(refreshKey) {
+function useNotifications(refreshKey, workspaceId, userId) {
   const [notifications, setNotifications] = useState([])
   const [unread, setUnread] = useState(0)
+  const [error, setError] = useState(null)
+  const busy = useRef(false)
   async function load() {
+    if (!workspaceId || !userId || busy.current) return
+    busy.current = true
+    setError(null)
     try {
       const n = await apiFetch('/notifications')
-      setNotifications(n)
-      setUnread(n.filter(x => !x.read).length)
-    } catch {}
+      if (getWorkspaceId() === workspaceId && getToken()) { setNotifications(n); setUnread(n.filter(x => !x.read).length) }
+    } catch (e) { setError(e) } finally { busy.current = false }
   }
-  useEffect(() => { load(); const int = setInterval(load, 15000); return () => clearInterval(int) }, [refreshKey])
-  return { notifications, unread, reload: load }
+  useEffect(() => { setNotifications([]); setUnread(0); setError(null); if (!workspaceId || !userId) return; load(); const int = setInterval(load, 15000); return () => clearInterval(int) }, [refreshKey, workspaceId, userId])
+  return { notifications, unread, error, reload: load }
 }
 
-function NotificationsView({ notifications, onGoto, onMarkRead, onMarkAllRead }) {
+function NotificationsView({ notifications, error, onRetry, onGoto, onMarkRead, onMarkAllRead }) {
   return (
     <div className="space-y-5 anim-fade-up">
+      {error && <LoadError error={error} onRetry={onRetry} />}
       <div className="flex items-end justify-between flex-wrap gap-3">
         <div>
           <p className="text-sm text-2 mb-1">Alertes & activité</p>
@@ -1777,8 +1875,8 @@ function NotificationsView({ notifications, onGoto, onMarkRead, onMarkAllRead })
 // PILOT VIEW (admin)
 // ================================================================
 function PilotView({ users, groups, refreshKey, onOpenTask, onNavigate }) {
-  const [data, setData] = useState(null)
-  useEffect(() => { apiFetch('/pilot').then(setData).catch(e => toast.error(e.message)) }, [refreshKey])
+  const { data, error, retry } = useApiData('/pilot', refreshKey)
+  if (error) return <LoadError error={error} onRetry={retry} />
   if (!data) return <div className="p-12 flex justify-center"><Loader2 className="animate-spin text-white/30" /></div>
 
   const { kpis, byGroup, byMember, critical, trend } = data
@@ -1899,7 +1997,7 @@ function PilotView({ users, groups, refreshKey, onOpenTask, onNavigate }) {
             {critical.map(t => (
               <button key={t.id} onClick={() => onOpenTask(t)}
                 className="surface-flat p-3 hover:border-white/15 text-left transition flex items-center gap-3">
-                <span className={`dot ${STATUS[t.status].dot}`} />
+                <span className={`dot ${(STATUS[t.status] || STATUS.todo).dot}`} />
                 <div className="flex-1 min-w-0">
                   <p className="text-[13px] font-medium truncate">{t.title}</p>
                   <p className="text-[10.5px] text-3">Échéance {fmtDate(t.dueDate)}</p>
@@ -1927,6 +2025,7 @@ function CalendarView({ me, users, onOpenTask, onCreate, refreshKey }) {
   const [view, setView] = useState('month') // month | week | day
   const [ref, setRef] = useState(new Date())
   const [scope, setScope] = useState('group') // mine | group | all
+  const [error, setError] = useState(null)
   const [tasks, setTasks] = useState([])
   const [loading, setLoading] = useState(true)
   const [selectedDay, setSelectedDay] = useState(null)
@@ -1950,13 +2049,14 @@ function CalendarView({ me, users, onOpenTask, onCreate, refreshKey }) {
   }, [ref, view])
 
   async function load() {
+    setError(null)
     setLoading(true)
     try {
       const from = range.from.toISOString()
       const to = range.to.toISOString()
       const t = await apiFetch(`/calendar?from=${from}&to=${to}&scope=${scope}`)
       setTasks(t)
-    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+    } catch (e) { setError(e) } finally { setLoading(false) }
   }
   useEffect(() => { load() }, [ref, view, scope, refreshKey])
 
@@ -1989,6 +2089,7 @@ function CalendarView({ me, users, onOpenTask, onCreate, refreshKey }) {
 
   return (
     <div className="space-y-5 anim-fade-up">
+      {error && <LoadError error={error} onRetry={load} />}
       <div className="flex items-end justify-between flex-wrap gap-3">
         <div>
           <p className="text-sm text-2 mb-1">Vue calendrier</p>
@@ -2037,10 +2138,10 @@ function CalendarView({ me, users, onOpenTask, onCreate, refreshKey }) {
               {(tasksByDay[dayKey(selectedDay)] || []).map(t => (
                 <button key={t.id} onClick={() => { setSelectedDay(null); onOpenTask(t) }}
                   className="w-full text-left surface-flat p-3 hover:border-white/15 transition flex items-center gap-3">
-                  <span className={`dot ${STATUS[t.status].dot}`} />
+                  <span className={`dot ${(STATUS[t.status] || STATUS.todo).dot}`} />
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium truncate">{t.title}</p>
-                    <p className="text-[11px] text-3">{STATUS[t.status].label}</p>
+                    <p className="text-[11px] text-3">{(STATUS[t.status] || STATUS.todo).label}</p>
                   </div>
                   <div className="flex -space-x-1.5">
                     {(t.assignees || []).slice(0, 3).map(id => <UserAvatar key={id} user={users[id]} size={20} />)}
@@ -2092,7 +2193,7 @@ function MonthGrid({ ref, tasksByDay, onOpenTask, onDayClick, today }) {
                   <div key={t.id} onClick={(e) => { e.stopPropagation(); onOpenTask(t) }}
                     className="text-[11px] px-1.5 py-0.5 rounded truncate cursor-pointer hover:bg-white/[0.05] flex items-center gap-1"
                     title={t.title}>
-                    <span className={`dot ${STATUS[t.status].dot} shrink-0`} />
+                    <span className={`dot ${(STATUS[t.status] || STATUS.todo).dot} shrink-0`} />
                     <span className="truncate">{t.title}</span>
                   </div>
                 ))}
@@ -2130,7 +2231,7 @@ function WeekView({ range, tasksByDay, onOpenTask, today }) {
                 {dayTasks.map(t => (
                   <button key={t.id} onClick={() => onOpenTask(t)}
                     className="w-full text-left text-[11px] p-2 rounded-lg surface-flat hover:border-white/15 flex items-start gap-1.5">
-                    <span className={`dot ${STATUS[t.status].dot} mt-1 shrink-0`} />
+                    <span className={`dot ${(STATUS[t.status] || STATUS.todo).dot} mt-1 shrink-0`} />
                     <span className="truncate">{t.title}</span>
                   </button>
                 ))}
@@ -2166,10 +2267,10 @@ function DayView({ day, tasks, onOpenTask, onCreate }) {
         {tasks.map(t => (
           <button key={t.id} onClick={() => onOpenTask(t)}
             className="w-full text-left surface-flat p-4 hover:border-white/15 transition flex items-center gap-3">
-            <span className={`dot ${STATUS[t.status].dot}`} />
+            <span className={`dot ${(STATUS[t.status] || STATUS.todo).dot}`} />
             <div className="flex-1 min-w-0">
               <p className="font-medium text-[14px] truncate">{t.title}</p>
-              <p className="text-[11.5px] text-3 mt-0.5">{STATUS[t.status].label}</p>
+              <p className="text-[11.5px] text-3 mt-0.5">{(STATUS[t.status] || STATUS.todo).label}</p>
             </div>
             <span className={`text-[10px] px-2 py-0.5 rounded-md border ${PRIORITY[t.priority]?.cls}`}>{PRIORITY[t.priority]?.label}</span>
           </button>
@@ -2190,6 +2291,7 @@ const ROLES_META = [
 ]
 
 function MembersView({ workspace, canManage, refreshKey, onRefresh }) {
+  const [error, setError] = useState(null)
   const [members, setMembers] = useState([])
   const [groups, setGroups] = useState([])
   const [loading, setLoading] = useState(true)
@@ -2197,6 +2299,7 @@ function MembersView({ workspace, canManage, refreshKey, onRefresh }) {
   const [editing, setEditing] = useState(null) // {member}
 
   async function load() {
+    setError(null)
     setLoading(true)
     try {
       const [ms, gs] = await Promise.all([
@@ -2204,7 +2307,7 @@ function MembersView({ workspace, canManage, refreshKey, onRefresh }) {
         apiFetch('/groups'),
       ])
       setMembers(ms); setGroups(gs)
-    } catch (e) { toast.error(e.message) } finally { setLoading(false) }
+    } catch (e) { setError(e) } finally { setLoading(false) }
   }
   useEffect(() => { load() }, [refreshKey])
 
@@ -2242,6 +2345,7 @@ function MembersView({ workspace, canManage, refreshKey, onRefresh }) {
 
   return (
     <div className="space-y-5 anim-fade-up">
+      {error && <LoadError error={error} onRetry={load} />}
       <div className="flex items-end justify-between flex-wrap gap-3">
         <div>
           <p className="text-sm text-2 mb-1">Espace · {workspace.name}</p>
@@ -2532,12 +2636,12 @@ function OnboardingScreen({ user, onCreated, onJoined, onLogout }) {
               <div className="space-y-3">
                 <div>
                   <label className="text-[11px] text-3 mb-1.5 block">Nom de l'espace *</label>
-                  <input autoFocus value={name} onChange={e => setName(e.target.value.slice(0, 60))} placeholder="Ex: Projet Alpha, EPCO 2026, Voyage Berlin"
+                  <input autoFocus value={name} onChange={e => setName(e.target.value.slice(0, 60))} placeholder="Ex: Projet Alpha, Équipe produit, Voyage Berlin"
                     className={input} />
                 </div>
                 <div>
                   <label className="text-[11px] text-3 mb-1.5 block">Description (optionnelle)</label>
-                  <textarea value={description} onChange={e => setDescription(e.target.value.slice(0, 300))} placeholder="Ex: Organisation du speed dating entreprises"
+                  <textarea value={description} onChange={e => setDescription(e.target.value.slice(0, 300))} placeholder="Ex: Coordination des tâches de notre équipe"
                     rows={3}
                     className={"w-full px-3 py-2.5 rounded-xl bg-[color:var(--w-surface-2)] border border-[color:var(--w-border)] text-white text-sm focus:outline-none focus:border-white/25 resize-none"} />
                 </div>
@@ -3045,6 +3149,7 @@ function WorkspaceSettingsView({ workspace, canManage, isOwner, users, onUpdated
   const [invitations, setInvitations] = useState([])
   const [invRole, setInvRole] = useState('member')
   const [audit, setAudit] = useState([])
+  const [loadError, setLoadError] = useState(null)
 
   async function save() {
     setSaving(true)
@@ -3056,7 +3161,8 @@ function WorkspaceSettingsView({ workspace, canManage, isOwner, users, onUpdated
   }
 
   async function loadInvitations() {
-    try { setInvitations(await apiFetch('/workspace/invitations')) } catch {}
+    setLoadError(null)
+    try { setInvitations(await apiFetch('/workspace/invitations')) } catch (e) { setLoadError(e) }
   }
   async function createInvitation() {
     try {
@@ -3072,7 +3178,8 @@ function WorkspaceSettingsView({ workspace, canManage, isOwner, users, onUpdated
     } catch (e) { toast.error(e.message) }
   }
   async function loadAudit() {
-    try { setAudit(await apiFetch('/workspace/audit')) } catch {}
+    setLoadError(null)
+    try { setAudit(await apiFetch('/workspace/audit')) } catch (e) { setLoadError(e) }
   }
 
   useEffect(() => {
@@ -3329,47 +3436,47 @@ export default function App() {
   const [onboardingMode, setOnboardingMode] = useState(null) // 'create' | 'join' | null (opened from switcher)
   const [invitePanelOpen, setInvitePanelOpen] = useState(false)
   const [showTutorial, setShowTutorial] = useState(false)
-  const notifs = useNotifications(refreshKey)
+  const notifs = useNotifications(refreshKey, workspace?.id, me?.id)
+  const [sessionError, setSessionError] = useState(null)
+  const [workspaceError, setWorkspaceError] = useState(null)
+  const workspaceRequest = useRef(0)
 
   async function loadWorkspaceData() {
+    const wid = getWorkspaceId()
+    const requestId = ++workspaceRequest.current
+    setWorkspaceError(null)
     try {
-      const gs = await apiFetch('/groups')
-      setGroups(gs)
-      const us = await apiFetch('/users')
-      setUsers(Object.fromEntries(us.map(u => [u.id, u])))
-      const dash = await apiFetch('/dashboard').catch(() => null)
-      if (dash) setDashboardMeta({ group: dash.group, role: dash.role })
-    } catch (e) { /* ignore */ }
+      const [gs, us, dash, ws] = await Promise.all([apiFetch('/groups'), apiFetch('/users'), apiFetch('/dashboard'), apiFetch('/workspace')])
+      if (requestId !== workspaceRequest.current || getWorkspaceId() !== wid) return
+      setGroups(gs); setUsers(Object.fromEntries(us.map(u => [u.id, u])))
+      setDashboardMeta({ group: dash.group, role: dash.role })
+      setWorkspace(previous => previous?.id === wid ? { ...previous, ...ws } : previous)
+    } catch (e) { if (requestId === workspaceRequest.current && getWorkspaceId() === wid) setWorkspaceError(e) }
   }
 
   async function bootstrap(withWelcome = false) {
-    setLoading(true)
-    if (getToken()) {
-      try {
-        const { user, workspaces: wsList } = await apiFetch('/auth/me')
-        setMe(user)
-        setWorkspaces(wsList || [])
-        if (!wsList || wsList.length === 0) {
-          setWorkspace(null)
-          setLoading(false)
-          return
-        }
-        const saved = localStorage.getItem('whatodo_workspace')
-        const active = wsList.find(w => w.id === saved) || wsList[0]
-        localStorage.setItem('whatodo_workspace', active.id)
-        setWorkspace(active)
-        if (withWelcome) setShowWelcome(true)
-        await loadWorkspaceData()
-      } catch { localStorage.removeItem('whatodo_token'); localStorage.removeItem('whatodo_workspace') }
-    }
-    setLoading(false)
+    setLoading(true); setSessionError(null)
+    try {
+      if (!getToken()) { setMe(null); setWorkspace(null); return }
+      const { user, workspaces: wsList } = await apiFetch('/auth/me')
+      setMe(user); setWorkspaces(wsList || [])
+      if (!wsList?.length) { localStorage.removeItem('whatodo_workspace'); setWorkspace(null); return }
+      const active = wsList.find(w => w.id === getWorkspaceId()) || wsList[0]
+      localStorage.setItem('whatodo_workspace', active.id)
+      setWorkspace(active)
+      if (withWelcome) setShowWelcome(true)
+      await loadWorkspaceData()
+    } catch (e) {
+      if ([401, 403].includes(e.status)) logout()
+      else setSessionError(e)
+    } finally { setLoading(false) }
   }
 
-  useEffect(() => { bootstrap(false) }, [])
+  useEffect(() => { bootstrap(false); const expired = () => logout(); window.addEventListener('whatodo:session-expired', expired); return () => window.removeEventListener('whatodo:session-expired', expired) }, [])
 
   async function switchWorkspace(w) {
     localStorage.setItem('whatodo_workspace', w.id)
-    setWorkspace(w)
+    setWorkspace(w); setGroups([]); setUsers({}); setDashboardMeta({ group: null, role: null }); setTaskOpen(null)
     setView('dashboard'); setViewGroupId(null)
     await loadWorkspaceData()
     setRefreshKey(k => k + 1)
@@ -3407,10 +3514,16 @@ export default function App() {
   function logout() {
     localStorage.removeItem('whatodo_token')
     localStorage.removeItem('whatodo_workspace')
+    workspaceRequest.current += 1
+    setSessionError(null); setWorkspaceError(null); setGroups([]); setUsers({}); setTaskOpen(null)
     setMe(null); setWorkspaces([]); setWorkspace(null); setView('dashboard')
   }
   function refresh() { setRefreshKey(k => k + 1) }
   function openTask(t) { setTaskOpen(t) }
+  function openCreateTask() {
+    if (workspace?.archivedAt || (dashboardMeta.role || workspace?.myRole) === 'viewer') return toast.error('Accès en lecture seule')
+    setCreateOpen(true)
+  }
   function taskUpdated(t) { setTaskOpen(t); refresh() }
   function goto(k) { setView(k); setSidebarOpen(false); setViewGroupId(null) }
 
@@ -3419,6 +3532,7 @@ export default function App() {
       <WhatodoLogo size={40} stroke="#ffffff" className="opacity-80 anim-logo-breath" />
     </div>
   )
+  if (sessionError) return <div className="max-w-lg mx-auto py-20 px-4"><LoadError error={sessionError} onRetry={() => bootstrap(false)} /></div>
   if (!me) return <LoginScreen onLogin={onLogin} />
 
   // Show welcome splash
@@ -3448,7 +3562,7 @@ export default function App() {
   const isAdmin = ['owner','admin'].includes(role)
 
   // Build a `me` object with workspace context for children
-  const meCtx = { ...me, role, groupId: myGroupId }
+  const meCtx = { ...me, role, groupId: myGroupId, readOnly: !!workspace.archivedAt }
 
   const NAV = [
     { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -3523,23 +3637,23 @@ export default function App() {
 
   const currentView = (() => {
     switch (view) {
-      case 'dashboard': return <DashboardView me={meCtx} group={dashboardMeta.group} users={users} onOpenTask={openTask} onNavigate={goto} onCreate={() => setCreateOpen(true)} />
+      case 'dashboard': return <DashboardView me={meCtx} group={dashboardMeta.group} users={users} onOpenTask={openTask} onNavigate={goto} onCreate={openCreateTask} />
       case 'tasks': return <TasksView me={meCtx} users={users} onOpenTask={openTask} refreshKey={refreshKey} />
-      case 'group': return <GroupView me={meCtx} users={users} onOpenTask={openTask} refreshKey={refreshKey} groupId={viewGroupId} onCreate={() => setCreateOpen(true)} />
+      case 'group': return <GroupView me={meCtx} users={users} onOpenTask={openTask} refreshKey={refreshKey} groupId={viewGroupId} onCreate={openCreateTask} />
       case 'validation': return <ValidationView users={users} groups={groups} onOpenTask={openTask} refreshKey={refreshKey} />
-      case 'admin_groups': return <AllGroupsView groups={groups} onOpenGroup={gid => { setViewGroupId(gid); setView('group') }} />
+      case 'admin_groups': return <AllGroupsView groups={groups} users={users} canManage={isAdmin && !workspace.archivedAt} onRefresh={async () => { await loadWorkspaceData(); refresh() }} onOpenGroup={gid => { setViewGroupId(gid); setView('group') }} />
       case 'members': return <MembersView workspace={workspace} canManage={isAdmin} refreshKey={refreshKey} onRefresh={() => { loadWorkspaceData(); refresh() }} />
-      case 'calendar': return <CalendarView me={meCtx} users={users} onOpenTask={openTask} onCreate={() => setCreateOpen(true)} refreshKey={refreshKey} />
+      case 'calendar': return <CalendarView me={meCtx} users={users} onOpenTask={openTask} onCreate={openCreateTask} refreshKey={refreshKey} />
       case 'gantt': return <GanttView me={meCtx} users={users} groups={groups} onOpenTask={openTask} refreshKey={refreshKey} />
-      case 'chat': return <ChatView me={meCtx} users={users} refreshKey={refreshKey} />
-      case 'notifs': return <NotificationsView notifications={notifs.notifications}
+      case 'chat': return <ChatView me={meCtx} users={users} groups={groups} refreshKey={refreshKey} />
+      case 'notifs': return <NotificationsView notifications={notifs.notifications} error={notifs.error} onRetry={notifs.reload}
         onGoto={(link) => { if (link?.view) goto(link.view) }}
-        onMarkRead={(id) => apiFetch('/notifications/mark-read', { method: 'POST', body: JSON.stringify({ id }) }).then(() => notifs.reload())}
-        onMarkAllRead={() => apiFetch('/notifications/mark-read', { method: 'POST', body: '{}' }).then(() => notifs.reload())} />
+        onMarkRead={(id) => apiFetch('/notifications/mark-read', { method: 'POST', body: JSON.stringify({ id }) }).then(() => notifs.reload()).catch(e => toast.error(e.message))}
+        onMarkAllRead={() => apiFetch('/notifications/mark-read', { method: 'POST', body: '{}' }).then(() => notifs.reload()).catch(e => toast.error(e.message))} />
       case 'pilot': return <PilotView users={users} groups={groups} refreshKey={refreshKey} onOpenTask={openTask} onNavigate={goto} />
       case 'profile': return <ProfileView me={me} onUpdated={u => setMe(u)} onLogout={logout} onReplayTutorial={() => setShowTutorial(true)} />
       case 'settings': return <WorkspaceSettingsView workspace={workspace} canManage={isAdmin} isOwner={role === 'owner'} users={users}
-        onUpdated={w => { setWorkspace(prev => ({ ...prev, ...w })); setWorkspaces(prev => prev.map(x => x.id === workspace.id ? { ...x, ...w } : x)) }}
+        onUpdated={w => { setWorkspace(prev => ({ ...prev, ...w })); setWorkspaces(prev => prev.map(x => x.id === workspace.id ? { ...x, ...w } : x)); loadWorkspaceData() }}
         onLeft={() => { const rest = workspaces.filter(x => x.id !== workspace.id); setWorkspaces(rest); if (rest.length) switchWorkspace(rest[0]); else { setWorkspace(null); setView('dashboard') } }}
         onDeleted={() => { const rest = workspaces.filter(x => x.id !== workspace.id); setWorkspaces(rest); if (rest.length) switchWorkspace(rest[0]); else { setWorkspace(null); setView('dashboard') } }} />
       default: return (
@@ -3582,13 +3696,13 @@ export default function App() {
             </div>
             <p className="font-semibold text-sm truncate">{workspace.name}</p>
           </div>
-          <button onClick={() => setCreateOpen(true)} className="w-9 h-9 rounded-xl btn-primary flex items-center justify-center">
+          <button onClick={openCreateTask} className="w-9 h-9 rounded-xl btn-primary flex items-center justify-center">
             <Plus className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="px-4 md:px-10 py-6 md:py-10 max-w-[1400px] mx-auto">
-          {currentView}
+        <div key={workspace.id} className="px-4 md:px-10 py-6 md:py-10 max-w-[1400px] mx-auto">
+          {workspaceError ? <LoadError error={workspaceError} onRetry={loadWorkspaceData} /> : currentView}
         </div>
 
         {/* Mobile bottom nav (glass) */}

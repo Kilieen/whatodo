@@ -1,18 +1,20 @@
+> Document historique. La cible actuelle est Render + MongoDB Atlas ; voir [RENDER.md](./RENDER.md). Les affirmations et plans ci-dessous ne constituent pas une validation de la version actuelle.
+
 # Rapport final — Whatodo avant migration hors Emergent
 
 Date : {{today}}
 
 ## 1. Données de démonstration supprimées
-- ✅ Backup complet créé avant purge : `/app/backup/mongo-epco_hub-*.json` (21 users, 1 workspace, 21 memberships, 4 groups, 17 tasks, 6 channels, 2 messages, 3 notifs).
+- ✅ Backup complet créé avant purge : `/app/backup/mongo-ancienne-base-*.json` (21 users, 1 workspace, 21 memberships, 4 groups, 17 tasks, 6 channels, 2 messages, 3 notifs).
 - ✅ Purge totale : `users`, `workspaces`, `workspace_members`, `groups`, `tasks`, `channels`, `messages`, `channel_reads`, `notifications`, `invitations`, `audit_log`, `password_resets`.
 - ✅ Suppression du **seed automatique** dans `route.js` : plus d'`ensureSeedAndMigration()` au démarrage.
 - ✅ `lib/seed.js` réécrit : ne contient plus que `makeInviteCode`, `ensureDefaultChannels` (utilisé quand un user crée un workspace) et `audit` (log).
 - ✅ Scripts fournis : `scripts/backup.js` + `scripts/wipe-demo.js` (backup puis purge).
-- ✅ Aucun EPCO/Jules/Kilian/Communication hardcodé nulle part.
+- ✅ Aucun démonstration/Jules/Kilian/Communication hardcodé nulle part.
 
 ## 2. Signup / Auth
 - ✅ `POST /auth/register` : validation email RFC + mot de passe ≥ 8 caractères + prénom obligatoire + email unique. Init des `notifPrefs`, `tutorialSeen: false`, `timezone`, `locale`.
-- ✅ Écran login refondu : plus de quick-pick démo, plus d'indices `epco2026`/`admin2026`.
+- ✅ Écran login refondu : plus de quick-pick démo, plus d'indices `[ancien mot de passe retiré]`/`[ancien mot de passe retiré]`.
 - ✅ Toggle inline : **Login ↔ Créer un compte ↔ Mot de passe oublié**.
 - ✅ Confirmation de mot de passe + show/hide password (Eye/EyeOff).
 - ✅ `POST /auth/change-password` (vérifie l'ancien mot de passe).
@@ -125,7 +127,7 @@ Date : {{today}}
 
 ## 20. Bugs corrigés
 - Ancien Login exposait publiquement la liste des emails et les mots de passe démo → supprimé.
-- Seed automatique recréait des comptes EPCO à chaque requête → supprimé.
+- Seed automatique recréait des comptes démonstration à chaque requête → supprimé.
 - `snapCenterToCursor` Kanban → conservé (déjà OK).
 
 ## 21. Tests réalisés
@@ -175,7 +177,7 @@ Date : {{today}}
 # ✅ Oui.
 
 Raisons précises :
-1. L'application démarre **totalement vide**. Aucun compte, workspace, groupe ou projet EPCO n'est créé automatiquement. Tout utilisateur commence de zéro comme dans une vraie app.
+1. L'application démarre **totalement vide**. Aucun compte, workspace, groupe ou projet démonstration n'est créé automatiquement. Tout utilisateur commence de zéro comme dans une vraie app.
 2. Le parcours **inscription → onboarding wizard → tutoriel → dashboard fonctionnel** a été testé de bout en bout (screenshots à l'appui).
 3. Le **backend est validé à 100 %** (58/58 tests automatisés) sur toutes les nouvelles fonctionnalités (auth, workspace settings, invitations, audit, gantt drag/resize, transfer, archive, delete, leave, delete-account).
 4. Les **fonctionnalités indispensables production** listées par toi sont toutes en place : reset password (structurel), transférer ownership, quitter workspace, archivage avant suppression, audit log, préférences de notifications, empty states.
