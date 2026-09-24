@@ -100,6 +100,42 @@ async function run() {
       const storage = await page.evaluate(() => JSON.stringify([Object.entries(localStorage), Object.entries(sessionStorage)]))
       assert.doesNotMatch(storage, /DonationTest|NomTest/)
       assert.deepEqual(sentNames, []); assert.deepEqual(unexpectedNavigation, []); assert.deepEqual(errors, [])
+      // Abandonment never submits a declaration or creates a notification.
+      const declarations = []
+      page.on('request', request => { if (request.url() === base + '/api/donations') declarations.push(JSON.parse(request.postData())) })
+      async function instructions() {
+        await trigger.click()
+        await modal.getByLabel('Prénom', { exact: true }).fill('DonationTest')
+        await modal.getByLabel('Nom', { exact: true }).fill('NomTest')
+        await modal.getByRole('button', { name: 'Continuer avec TWINT', exact: true }).click()
+      }
+      await instructions()
+      await modal.getByRole('button', { name: 'Abandonner', exact: true }).click()
+      await modal.waitFor({ state: 'hidden' })
+      assert.equal(declarations.length, 0)
+      // Simulate a lost response AFTER the server has stored the donation.
+      let firstResponse
+      await page.route('**/api/donations', async route => {
+        const response = await route.fetch()
+        firstResponse = await response.json()
+        await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Réponse perdue (test)' }) })
+      }, { times: 1 })
+      await instructions()
+      await modal.getByRole('button', { name: 'J’ai fait le don', exact: true }).evaluate(button => { button.click(); button.click() })
+      await modal.getByRole('alert').filter({ hasText: 'Réponse perdue' }).waitFor()
+      assert.equal(declarations.length, 1, 'synchronous double click submits only once')
+      await modal.getByRole('button', { name: 'J’ai fait le don', exact: true }).click()
+      await modal.getByText('Ta déclaration de don a bien été enregistrée.', { exact: true }).waitFor()
+      assert.equal(declarations.length, 2)
+      assert.equal(declarations[0].requestId, declarations[1].requestId, 'retry uses same idempotency key')
+      assert.equal(firstResponse.status, 'declared_paid')
+      assert.doesNotMatch(await modal.innerText(), /Paiement confirmé|Paiement reçu|Don vérifié/)
+      const notificationResponse = await context.request.get(base + '/api/notifications', { headers: { Authorization: `Bearer ${fixture.owner.token}`, 'X-Workspace-Id': fixture.ws.id } })
+      const ownerNotifications = await notificationResponse.json()
+      assert.equal(ownerNotifications.filter(n => n.id === `donation:${firstResponse.id}:${fixture.owner.user.id}`).length, 1)
+      await modal.getByRole('button', { name: 'Fermer', exact: true }).click()
+      await modal.waitFor({ state: 'hidden' })
+      assert.deepEqual(errors, [])
       if (mobile) {
         assert.equal(await page.evaluate(() => matchMedia('(display-mode: standalone)').matches), true)
         await page.evaluate(() => navigator.serviceWorker.ready.then(() => true))

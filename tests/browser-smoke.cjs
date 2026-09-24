@@ -17,7 +17,7 @@ async function launch() {
   page.setDefaultTimeout(20000)
 }
 async function expectDashboard() { await page.getByRole('heading', { name: 'Dashboard', exact: true }).waitFor() }
-async function nav(name) { await page.locator('aside nav').getByRole('button', { name, exact: true }).click() }
+async function nav(name) { await page.locator('aside nav').getByRole('button', { name: name === 'Notifications' ? /^Notifications(?:\s*\d+)?$/ : name, exact: true }).click() }
 async function token() { return page.evaluate(() => localStorage.getItem('whatodo_token')) }
 async function run() {
   await launch()
