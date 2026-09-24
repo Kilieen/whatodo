@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState, useRef } from 'react'
 import { apiFetch, getToken, getWorkspaceId } from '@/lib/api-client'
+import { DonationSupport } from '@/components/donation-support'
 import { useTheme } from 'next-themes'
 import { toast } from 'sonner'
 import {
@@ -3617,6 +3618,7 @@ export default function App() {
         )}
       </nav>
       <div className="p-3 border-t border-[color:var(--w-border)]">
+        <DonationSupport />
         <button onClick={() => goto('profile')} className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-white/[0.03] transition text-left">
           {me.avatar ? (
             <img src={me.avatar} alt="" className="w-8 h-8 rounded-lg object-cover shrink-0" />
@@ -3686,7 +3688,7 @@ export default function App() {
       <main className="flex-1 md:ml-[240px] min-w-0 pb-24 md:pb-8 relative z-10">
         {/* Mobile top bar */}
         <div className="md:hidden sticky top-0 z-20 bg-[color:var(--w-bg)]/90 backdrop-blur-md px-4 py-3 flex items-center justify-between border-b border-[color:var(--w-border)]">
-          <button onClick={() => setSidebarOpen(true)} className="icon-btn">
+          <button onClick={() => setSidebarOpen(true)} className="icon-btn" aria-label="Ouvrir le menu">
             <Menu className="w-4 h-4" />
           </button>
           <div className="flex items-center gap-2 min-w-0">
