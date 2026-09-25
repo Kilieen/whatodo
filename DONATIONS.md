@@ -66,3 +66,13 @@ git add 'app/api/[[...path]]/route.js' components/donation-support.jsx tests/sta
 git commit -m "Track user-declared TWINT donations and notify workspace admins"
 git push -u origin feature/donation-tracking
 ```
+
+## Correction du clic sur notification (25 septembre 2026)
+
+La notification utilisait déjà `type: donation_declared`. Son `id` de la forme `donation:<UUID>:<UUID>` était envoyé au clic à `POST /api/notifications/mark-read`. La validation générique `id()` n’acceptait pas les deux-points : l’erreur provenait du marquage comme lu, sans appel à une tâche ni conversion ObjectId.
+
+Un validateur dédié accepte les IDs de notification ordinaires et ce format composite strict, uniquement pour le marquage comme lu. Les validations des autres ressources restent inchangées. Les anciens documents restent compatibles, sans migration. Les nouvelles notifications portent aussi `donationId`, `firstName`, `lastName`, `amount` et `currency`.
+
+Le clic est traité explicitement par type : les dons ouvrent une modal de déclaration et sont marqués comme lus ; les tâches, validations et mentions conservent leurs destinations ; les types inconnus sont seulement marqués comme lus. La modal utilise les champs structurés ou, pour les anciens documents, le message existant. Aucun paiement TWINT n’est vérifié.
+
+Le test `tests/notifications-browser.cjs` utilise les mêmes variables Playwright et fixture que les autres tests navigateur. Le lancer après les tests API, avant `tests/browser-smoke.cjs` qui modifie le mot de passe de la fixture. Il couvre le vrai marquage comme lu, l’absence d’appel tâche au clic sur un don, les données anciennes, les types inconnus et la navigation d’une notification de tâche.

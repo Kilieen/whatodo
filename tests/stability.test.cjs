@@ -176,7 +176,15 @@ test('production API with disposable MongoDB: product flows and authorization', 
     const notifications = await db.collection('notifications').find({ type: 'donation_declared', workspaceId: ws.id }).toArray()
     assert.equal(notifications.length, 2)
     assert.deepEqual(new Set(notifications.map(n => n.userId)), new Set([owner.user.id, admin.user.id]))
+    const ownerNotification = notifications.find(n => n.userId === owner.user.id)
+    await api('/notifications/mark-read', owner, ws, 'POST', { id: ownerNotification.id })
+    assert.equal((await db.collection('notifications').findOne({ id: ownerNotification.id })).read, true)
+    for (const bad of ['', null, {}, 'donation:bad:bad', 'missing:target']) await api('/notifications/mark-read', owner, ws, 'POST', { id: bad }, 400)
+    const adminNotification = notifications.find(n => n.userId === admin.user.id)
+    await api('/notifications/mark-read', viewer, ws, 'POST', { id: adminNotification.id })
+    assert.equal((await db.collection('notifications').findOne({ id: adminNotification.id })).read, false)
     for (const n of notifications) {
+      assert.equal(n.firstName, 'Jean'); assert.equal(n.lastName, 'Dupont'); assert.equal(n.amount, 5); assert.equal(n.currency, 'CHF')
       assert.match(n.body, /Jean Dupont indique avoir effectué un don de CHF 5.00/)
       assert.doesNotMatch(n.body, /4179|Paiement confirmé|Paiement reçu|Don vérifié/)
     }
