@@ -23,7 +23,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Checkbox } from '@/components/ui/checkbox'
 
@@ -1844,8 +1844,44 @@ function useNotifications(refreshKey, workspaceId, userId) {
 }
 
 function NotificationsView({ notifications, error, onRetry, onGoto, onMarkRead, onMarkAllRead }) {
+  const [donation, setDonation] = useState(null)
+  function openNotification(notification) {
+    if (notification.id) onMarkRead(notification.id)
+    switch (notification.type) {
+      case 'donation_declared':
+        setDonation(notification)
+        break
+      case 'task_assigned':
+      case 'task_comment':
+      case 'comment':
+      case 'task_validated':
+      case 'task_rejected':
+        onGoto({ view: 'tasks' })
+        break
+      case 'validation_requested':
+        onGoto({ view: 'validation' })
+        break
+      case 'mention':
+        onGoto({ view: 'chat' })
+        break
+      default:
+        break
+    }
+  }
   return (
     <div className="space-y-5 anim-fade-up">
+      <Dialog open={!!donation} onOpenChange={open => { if (!open) setDonation(null) }}>
+        <DialogContent className="w-glass max-w-lg max-h-[90dvh] overflow-y-auto rounded-2xl border-white/10">
+          <DialogHeader>
+            <DialogTitle>Nouveau don déclaré ❤️</DialogTitle>
+            <DialogDescription>Cette information est une déclaration utilisateur et ne constitue pas une confirmation TWINT.</DialogDescription>
+          </DialogHeader>
+          <p className="text-sm break-words">{donation?.firstName && donation?.lastName && Number.isFinite(donation?.amount) && donation?.currency === 'CHF'
+            ? `${donation.firstName} ${donation.lastName} indique avoir effectué un don de CHF ${donation.amount.toFixed(2)}.`
+            : donation?.body}</p>
+          <DialogFooter><button type="button" onClick={() => setDonation(null)} className="btn-primary rounded-xl px-4 py-2">Fermer</button></DialogFooter>
+        </DialogContent>
+      </Dialog>
       {error && <LoadError error={error} onRetry={onRetry} />}
       <div className="flex items-end justify-between flex-wrap gap-3">
         <div>
@@ -1857,7 +1893,7 @@ function NotificationsView({ notifications, error, onRetry, onGoto, onMarkRead, 
       <div className="surface divide-y divide-[color:var(--w-border)] overflow-hidden">
         {notifications.length === 0 && <div className="p-10 text-center text-sm text-2">Aucune notification.</div>}
         {notifications.map(n => (
-          <button key={n.id} onClick={() => { onMarkRead(n.id); onGoto(n.link) }}
+          <button key={n.id} onClick={() => openNotification(n)}
             className={`w-full flex items-start gap-3 px-4 py-3 text-left hover:bg-white/[0.02] transition ${n.read ? '' : 'bg-white/[0.02]'}`}>
             <span className={`w-2 h-2 rounded-full mt-2 shrink-0 ${n.read ? 'bg-white/15' : 'bg-blue-400'}`} />
             <div className="flex-1 min-w-0">

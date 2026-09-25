@@ -7,7 +7,7 @@ import { signToken, comparePassword, hashPassword,
   canManageWorkspace, canManageGroupTasks, canViewTask, canViewGroup, canReadChannel,
   rateLimit, getClientIp, validateDataUrl, UPLOAD_LIMITS
 } from '@/lib/authz'
-import { invalid, text, id, ids, date, workspaceGroup, workspaceUsers, taskInput, syncGroups } from '@/lib/validation'
+import { invalid, text, id, notificationId, ids, date, workspaceGroup, workspaceUsers, taskInput, syncGroups } from '@/lib/validation'
 import { makeInviteCode, ensureDefaultChannels, audit } from '@/lib/seed'
 
 // CORS: scope to known origins in production, permissive in dev/preview.
@@ -71,7 +71,7 @@ async function handleRoute(request, { params }) {
         if (['email', 'firstName', 'lastName', 'displayName', 'name', 'title', 'description', 'content', 'bio', 'password', 'currentPassword', 'newPassword', 'token', 'inviteCode', 'timezone', 'locale', 'theme', 'avatarColor', 'color', 'emoji', 'icon', 'comment', 'fileName', 'mimeType', 'type', 'text', 'linkUrl'].includes(key)) {
           text(value, key, ['description', 'content', 'text'].includes(key) ? 10000 : ['password', 'currentPassword', 'newPassword'].includes(key) ? 72 : 300)
         }
-        if (['groupId', 'leaderId', 'targetUserId', 'replyToId', 'id'].includes(key) && value !== null && value !== '') id(value, key)
+        if (['groupId', 'leaderId', 'targetUserId', 'replyToId', 'id'].includes(key) && value !== null && value !== '') (key === 'id' && route === '/notifications/mark-read' ? notificationId(value) : id(value, key))
         if (['memberIds', 'assignees'].includes(key)) ids(value, key)
       }
     }
@@ -430,6 +430,7 @@ async function handleRoute(request, { params }) {
         try {
           await db.collection('notifications').updateOne({ _id: notificationId }, { $setOnInsert: {
             id: notificationId, workspaceId: workspace.id, userId: recipient.userId,
+            donationId: donation.id, firstName: donation.firstName, lastName: donation.lastName, amount: donation.amount, currency: donation.currency,
             type: 'donation_declared', title: 'Nouveau don déclaré ❤️',
             body: `${donation.firstName} ${donation.lastName} indique avoir effectué un don de ${formatDonation(result.cents)} pour soutenir Whatodo.`,
             link: { view: 'notifs' }, read: false, createdAt: donation.createdAt,
@@ -1022,7 +1023,8 @@ async function handleRoute(request, { params }) {
     if (route === '/notifications/mark-read' && method === 'POST') {
       const body = await readBody().catch(() => ({}))
       const q = { userId: user.id, workspaceId: workspace.id }
-      if (body.id) q.id = body.id
+      if (Object.hasOwn(body, 'id')) q.id = notificationId(body.id)
+      if (!['owner', 'admin'].includes(member.role)) q.type = { $ne: 'donation_declared' }
       await db.collection('notifications').updateMany(q, { $set: { read: true, readAt: new Date() } })
       return json({ ok: true })
     }
